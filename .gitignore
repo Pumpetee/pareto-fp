@@ -1,0 +1,22 @@
+# сборочный мусор бенчей
+bench/*.exe
+bench/*.out
+bench/*.obj
+bench/*.pdb
+bench/fair_*.c
+bench/native_*.c
+bench/case_*.mjs
+bench/reduce_*.mjs
+bench/*.bin
+
+# питон
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# редакторы и системы
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
