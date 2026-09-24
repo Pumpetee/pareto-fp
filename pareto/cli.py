@@ -1,11 +1,14 @@
 # -*- coding: utf-8 -*-
-"""Точка входа для человека со своей формулой.
+"""Entry point for a person with an expression of their own.
 
     python -m pareto.cli "sqrt(x+1) - sqrt(x)" --domain x=1e6..1e9
     python -m pareto.cli "x*x - y*y" --domain x=1..2 --domain y=1..2 --json
 
-Ничего, кроме питона, не нужно: ни node, ни clang. Компилятор подключается
-только в замерах (`pareto/run_fairbench.py`), здесь считается модель.
+Nothing but Python is required: no node, no clang. The compiler is only involved
+in the benchmarks (`pareto/run_fairbench.py`); here the model is evaluated.
+
+Output is English and ASCII on purpose. A Windows console defaults to cp1252,
+and the first CI run died on exactly that: a non-ASCII byte in stdout.
 """
 from __future__ import annotations
 
@@ -24,20 +27,20 @@ from pareto.rules import RULES
 
 
 def parse_domain(items, vars_):
-    """`x=1..2` или `x=1e6..1e9`. Без диапазонов границу ошибки посчитать нельзя."""
+    """`x=1..2` or `x=1e6..1e9`. Without ranges there is no error bound to prove."""
     dom = {}
     for it in items or []:
         if '=' not in it or '..' not in it:
-            raise SystemExit('диапазон пишется как x=1..2, встречено: ' + it)
+            raise SystemExit('a range is written as x=1..2, got: ' + it)
         name, rng = it.split('=', 1)
         lo, hi = rng.split('..', 1)
         try:
             dom[name.strip()] = (float(lo), float(hi))
         except ValueError:
-            raise SystemExit('границы диапазона должны быть числами: ' + it)
+            raise SystemExit('range bounds must be numbers: ' + it)
     missing = [v for v in vars_ if v not in dom]
     if missing:
-        raise SystemExit('не задан диапазон для: {}. Пример: --domain {}=1..2'.format(
+        raise SystemExit('no range given for: {}. Example: --domain {}=1..2'.format(
             ', '.join(missing), missing[0]))
     return dom
 
@@ -70,48 +73,57 @@ def analyse(text, dom, keep=10, iters=10, budget=2.0, cost_budget=1.5):
 
 def render(r):
     b = r['base']
-    out = ['входная формула : ' + r['input'],
-           'стоимость модели: {:.1f} · граница ошибки: {:.3e}'.format(b['cost'], b['err']), '',
-           'фронт Парето (все недоминируемые формы):',
-           '{:>9} {:>12}  {}'.format('стоимость', 'ошибка', 'форма')]
+    out = ['input expression: ' + r['input'],
+           'model cost: {:.1f} | proven error bound: {:.3e}'.format(b['cost'], b['err']), '',
+           'Pareto front (every non-dominated form):',
+           '{:>9} {:>12}  {}'.format('cost', 'bound', 'form')]
     for p in r['front']:
         out.append('{:>9.1f} {:>12.3e}  {}'.format(p['cost'], p['err'], p['form']))
     out += ['']
     fa, ex = r['fastest'], r['most_exact']
     speed = (b['cost'] / fa['cost']) if fa['cost'] else float('inf')
-    out.append('быстрее всего   : {}'.format(fa['form']))
-    out.append('                  дешевле в {:.2f}x, граница ошибки {:.3e}'.format(speed, fa['err']))
-    out.append('точнее всего    : {}'.format(ex['form']))
+    out.append('cheapest form   : {}'.format(fa['form']))
+    out.append('                  {:.2f}x cheaper, error bound {:.3e}'.format(speed, fa['err']))
+    out.append('most accurate   : {}'.format(ex['form']))
     if b['err'] > 0 and ex['err'] > 0:
-        out.append('                  ошибка меньше в {:.3g}x, цена {:.2f}x'.format(
+        out.append('                  bound {:.3g}x smaller, costs {:.2f}x'.format(
             b['err'] / ex['err'], (ex['cost'] / b['cost']) if b['cost'] else 1.0))
     elif ex['err'] == 0:
-        out.append('                  ошибка модели ноль, цена {:.2f}x'.format(
+        out.append('                  model error is zero, costs {:.2f}x'.format(
             (ex['cost'] / b['cost']) if b['cost'] else 1.0))
-    out += ['', 'вставить в код  : ' + fa['c']]
+    out += ['', 'paste into code : ' + fa['c']]
     return '\n'.join(out)
 
 
 def main(argv=None):
+    # A Windows console is cp1252 by default; force UTF-8 so output never dies on a byte.
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, 'reconfigure'):
+            try:
+                stream.reconfigure(encoding='utf-8', errors='replace')
+            except Exception:
+                pass
+
     ap = argparse.ArgumentParser(
         prog='pareto',
-        description='Переписывает числовую формулу в эквивалентную: быстрее или точнее, с границей ошибки.')
-    ap.add_argument('expr', help='формула, например "sqrt(x+1) - sqrt(x)"')
+        description='Rewrites a numeric expression into an equivalent one: cheaper or more '
+                    'accurate, with a proven error bound.')
+    ap.add_argument('expr', help='the expression, e.g. "sqrt(x+1) - sqrt(x)"')
     ap.add_argument('--domain', action='append', metavar='x=1..2',
-                    help='диапазон переменной, можно повторять для каждой')
+                    help='range of a variable, repeat the flag for each one')
     ap.add_argument('--budget', type=float, default=2.0,
-                    help='во сколько раз допустимо ухудшить точность ради скорости (по умолчанию 2)')
+                    help='how much accuracy may be traded for speed, as a factor (default 2)')
     ap.add_argument('--cost-budget', type=float, default=1.5,
-                    help='во сколько раз допустимо удорожание ради точности (по умолчанию 1.5)')
-    ap.add_argument('--keep', type=int, default=10, help='сколько точек фронта показывать')
-    ap.add_argument('--iters', type=int, default=10, help='итераций насыщения e-графа')
-    ap.add_argument('--json', action='store_true', help='выдать результат машинно')
+                    help='how much cost may be traded for accuracy, as a factor (default 1.5)')
+    ap.add_argument('--keep', type=int, default=10, help='how many front points to show')
+    ap.add_argument('--iters', type=int, default=10, help='e-graph saturation iterations')
+    ap.add_argument('--json', action='store_true', help='machine-readable output')
     a = ap.parse_args(argv)
 
     try:
         tree = parse(a.expr)
     except ParseError as e:
-        raise SystemExit('формулу не разобрал: {}'.format(e))
+        raise SystemExit('could not parse the expression: {}'.format(e))
     dom = parse_domain(a.domain, variables(tree))
 
     r = analyse(a.expr, dom, keep=a.keep, iters=a.iters,

@@ -57,7 +57,7 @@ def tokenize(s):
             out.append(('op', c))
             i += 1
             continue
-        raise ParseError('непонятный символ {!r} в позиции {}'.format(c, i))
+        raise ParseError('unexpected character {!r} at position {}'.format(c, i))
     return out
 
 
@@ -71,9 +71,9 @@ class _P:
     def take(self, kind=None, val=None):
         k, v = self.peek()
         if k is None:
-            raise ParseError('формула оборвалась')
+            raise ParseError('expression ends unexpectedly')
         if (kind and k != kind) or (val and v != val):
-            raise ParseError('ожидалось {}, встретилось {!r}'.format(val or kind, v))
+            raise ParseError('expected {}, got {!r}'.format(val or kind, v))
         self.i += 1
         return v
 
@@ -102,11 +102,11 @@ class _P:
                 neg = True
                 k, v = self.peek()
             if k != 'num':
-                raise ParseError('степень поддержана только с целым показателем')
+                raise ParseError('powers are supported with integer exponents only')
             self.take('num')
             e = float(v)
             if e != int(e) or neg or e < 0:
-                raise ParseError('степень поддержана только целая неотрицательная, встречено {}'.format(
+                raise ParseError('powers must be non-negative integers, got {}'.format(
                     ('-' if neg else '') + v))
             e = int(e)
             if e == 0:
@@ -135,7 +135,7 @@ class _P:
             self.take('name')
             if self.peek() == ('op', '('):
                 if v not in FUNCS:
-                    raise ParseError('функция {} не поддержана, есть только {}'.format(v, ', '.join(FUNCS)))
+                    raise ParseError('function {} is not supported, available: {}'.format(v, ', '.join(FUNCS)))
                 self.take('op', '(')
                 arg = self.expr()
                 self.take('op', ')')
@@ -146,14 +146,14 @@ class _P:
             node = self.expr()
             self.take('op', ')')
             return node
-        raise ParseError('не разобрал начало выражения: {!r}'.format(v))
+        raise ParseError('cannot parse the start of the expression: {!r}'.format(v))
 
 
 def parse(text):
     p = _P(tokenize(text))
     node = p.expr()
     if p.i != len(p.t):
-        raise ParseError('лишнее в конце: {!r}'.format(p.t[p.i][1]))
+        raise ParseError('trailing input: {!r}'.format(p.t[p.i][1]))
     return node
 
 
