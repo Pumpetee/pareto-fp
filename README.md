@@ -52,7 +52,7 @@ One finding worth its own line: `-ffast-math` **destroys compensated summation**
 No dependencies, Python 3.10+:
 
 ```
-git clone https://github.com/USERNAME/pareto-fp && cd pareto-fp
+git clone https://github.com/Pumpetee/pareto-fp && cd pareto-fp
 python -m pareto.cli "sqrt(x+1) - sqrt(x)" --domain x=1e6..1e9
 ```
 
@@ -102,6 +102,8 @@ Reports: `bench/mlir_report.txt`, `bench/mlir_results.json`. Generated modules a
 
 [Herbie](https://herbie.uwplse.org/) solves half of the same problem: it finds a numerically stable form, but it does not model cost and does not give a proven bound. Both tools were run on the same seven cases, and the forms Herbie produced were scored with our own model.
 
+**Read this section with that bias in mind.** Herbie optimises average error in bits over sampled inputs, while the table below scores its forms with our worst-case bound and our cost model. Winning under one's own metric is not winning. Treat this as "our front covers what Herbie returned, measured our way", not as a claim of superiority — a fair head-to-head needs Herbie's own metric as well, and that comparison is not done yet.
+
 Comparing a single form against a whole front would be meaningless, so the question asked is different: **does our front contain a point that is no worse than Herbie's answer on both metrics at once?**
 
 | case | Herbie's form | our front covers it |
@@ -148,6 +150,14 @@ What is new is the combination: **both metrics computed together**, an error bud
 - Saturation blows up on expressions with roots: 6 nodes become 6056 after saturation. Bounded by `node_limit`.
 - Supported functions: `sqrt`, `exp`, `log`, `fma`, plus `+ - * /` and integer powers.
 - On Windows, `mlir-opt` refuses paths containing non-ASCII characters, so the MLIR pipeline stages its files in a temporary directory.
+- Timings come from a single laptop CPU (Ryzen 5 5500U, 15 W, thermally limited). Treat the speed ratios as orders of magnitude, not exact figures, and re-run them on your own machine.
+- The cost model uses operation weights, not measured latency, and the `fma` weight is calibrated on that same laptop. On different hardware the ordering of points on the front can change.
+
+## The bound is tested, not asserted
+
+`tests/test_bound.py` rebuilds the Pareto front and checks, on every form it finds, that the error actually measured against a 60-digit `Decimal` reference never exceeds the bound the analysis proved. Inputs are drawn pseudo-randomly with a fixed seed plus the domain corners — deliberately not a uniform grid, since cancellation lives in narrow spots a grid can step over.
+
+The margin today ranges from 1.6x to 400x, so the test is tight enough to notice a regression: halving any bound makes it fail.
 
 ## Status
 
