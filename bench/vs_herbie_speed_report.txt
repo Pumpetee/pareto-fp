@@ -1,0 +1,36 @@
+Same accuracy, different price: Herbie's form versus ours, one binary per case,
+clang ['-O3', '-ffp-contract=off'], 1024 points x 400 reps.
+
+case          herbie ms   ours ms  speedup   herbie err     our err
+diff_sqrt         2.889     2.269     1.27    2.177e-16   2.201e-16
+poly              1.421     1.322     1.08    7.115e-16   7.115e-16
+two_div           1.014     1.014     1.00    1.357e-16   1.353e-16
+div_chain         1.014     1.014     1.00    1.646e-16   1.646e-16
+log_ratio         2.391     2.394     1.00    1.302e-16   1.302e-16
+exp_sum           3.580     3.286     1.09    2.188e-16   2.465e-16
+sq_diff           0.509     0.509     1.00    3.064e-09   3.064e-09
+
+faster than Herbie on 3 of 7 cases, slower on 0, geometric mean 1.06x.
+
+Forms:
+  diff_sqrt
+    herbie: (1 / (sqrt(x) + sqrt((x * ((1 + x) / x)))))
+    ours  : (1 / (sqrt(x) + sqrt((x + 1))))
+  poly
+    herbie: fma(x, fma((4.5 * x), x, 2.5), fma((3.5 * x), x, 1.5))
+    ours  : fma(fma(fma(4.5, x, 3.5), x, 2.5), x, 1.5)
+  two_div
+    herbie: fma(a, (1 / c), (b / c))
+    ours  : ((b / c) + (a / c))
+  div_chain
+    herbie: ((a / b) / c)
+    ours  : ((a / b) / c)
+  log_ratio
+    herbie: log((a / b))
+    ours  : log((a / b))
+  exp_sum
+    herbie: (exp(b) / exp(-a))
+    ours  : (exp(b) * exp(a))
+  sq_diff
+    herbie: fma(y, (x - y), ((x - y) * x))
+    ours  : fma(x, (x - y), (y * (x - y)))

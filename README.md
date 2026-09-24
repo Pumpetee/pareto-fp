@@ -121,6 +121,24 @@ Scoring someone else's tool with your own metric proves nothing, so the honest t
 
 **On Herbie's metric this project wins nothing: six ties and one loss.** Both tools take the two catastrophic cases from tens of bits of error down to a fraction of a bit, and on the rest they land within noise of each other. Anyone told that this tool "beats Herbie on accuracy" was told something false.
 
+### Where the difference actually shows up: price
+
+Herbie has no cost model. It returns a numerically good form and stops there, so the form it picks is often the more expensive one — `fma(a, 1/c, b/c)` carries two divisions where `(a+b)/c` has one, `exp(b)/exp(-a)` trades a multiply for a divide plus a negation. Both forms compiled into one binary per case, identical flags, `-O3 -ffp-contract=off`:
+
+| case | Herbie | ours | speedup | Herbie error | our error |
+|---|---|---|---|---|---|
+| `diff_sqrt` | 2.889 ms | **2.269 ms** | **1.27x** | 2.177e-16 | 2.201e-16 |
+| `poly` | 1.421 ms | **1.322 ms** | **1.08x** | 7.115e-16 | 7.115e-16 |
+| `exp_sum` | 3.580 ms | **3.286 ms** | **1.09x** | 2.188e-16 | 2.465e-16 |
+| `two_div` | 1.014 ms | 1.014 ms | 1.00x | 1.357e-16 | 1.353e-16 |
+| `div_chain` | 1.014 ms | 1.014 ms | 1.00x | 1.646e-16 | 1.646e-16 |
+| `log_ratio` | 2.391 ms | 2.394 ms | 1.00x | 1.302e-16 | 1.302e-16 |
+| `sq_diff` | 0.509 ms | 0.509 ms | 1.00x | 3.064e-09 | 3.064e-09 |
+
+**Faster on three of seven, slower on none, geometric mean 1.06x, accuracy level throughout.** That is the honest size of the win: not an order of magnitude, a few percent on average and a quarter on the best case — earned by having a cost model where the other tool has none. Reproduce with `python pareto/run_vs_herbie_speed.py`.
+
+Worth stating plainly: on these seven cases both tools have hit the floor of double precision. Worst observed error is one to two ulps on either side, so "more accurate than Herbie" is not a thing that can be won here by anyone.
+
 The actual difference is not accuracy, it is what you get back. Herbie returns one form with an empirical improvement and no guarantee. This returns the whole cost-versus-error front with a **statically proven worst-case bound** on every point, so a caller can say "give me the cheapest form that loses at most one bit" and have that hold for every input in the range, not on average over a sample. Reproduce with `python pareto/run_herbie_metric.py`, raw numbers in `bench/herbie_metric_report.txt`.
 
 Caveat worth naming: Herbie samples inputs over the floating-point representation, this script samples uniformly over the value range. On a wide domain like `1e6..1e9` those distributions differ.

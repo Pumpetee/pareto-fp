@@ -1,0 +1,72 @@
+[
+ {
+  "name": "diff_sqrt",
+  "herbie_form": "(1 / (sqrt(x) + sqrt((x * ((1 + x) / x)))))",
+  "ours_form": "(1 / (sqrt(x) + sqrt((x + 1))))",
+  "herbie_ms": 2.8895,
+  "ours_ms": 2.2692,
+  "speedup": 1.2733562488982901,
+  "herbie_err": 2.1771790438085275e-16,
+  "ours_err": 2.2014877307753188e-16
+ },
+ {
+  "name": "poly",
+  "herbie_form": "fma(x, fma((4.5 * x), x, 2.5), fma((3.5 * x), x, 1.5))",
+  "ours_form": "fma(fma(fma(4.5, x, 3.5), x, 2.5), x, 1.5)",
+  "herbie_ms": 1.4213,
+  "ours_ms": 1.3219,
+  "speedup": 1.0751947953703003,
+  "herbie_err": 7.115420063071901e-16,
+  "ours_err": 7.115420063071901e-16
+ },
+ {
+  "name": "two_div",
+  "herbie_form": "fma(a, (1 / c), (b / c))",
+  "ours_form": "((b / c) + (a / c))",
+  "herbie_ms": 1.0138,
+  "ours_ms": 1.0138,
+  "speedup": 1.0,
+  "herbie_err": 1.3566983185035278e-16,
+  "ours_err": 1.3530843112619095e-16
+ },
+ {
+  "name": "div_chain",
+  "herbie_form": "((a / b) / c)",
+  "ours_form": "((a / b) / c)",
+  "herbie_ms": 1.0141,
+  "ours_ms": 1.0141,
+  "speedup": 1.0,
+  "herbie_err": 1.6464732574855942e-16,
+  "ours_err": 1.6464732574855942e-16
+ },
+ {
+  "name": "log_ratio",
+  "herbie_form": "log((a / b))",
+  "ours_form": "log((a / b))",
+  "herbie_ms": 2.3906,
+  "ours_ms": 2.3939,
+  "speedup": 0.9986214963031037,
+  "herbie_err": 1.3024089273644213e-16,
+  "ours_err": 1.3024089273644213e-16
+ },
+ {
+  "name": "exp_sum",
+  "herbie_form": "(exp(b) / exp(-a))",
+  "ours_form": "(exp(b) * exp(a))",
+  "herbie_ms": 3.5804,
+  "ours_ms": 3.2856,
+  "speedup": 1.0897248599951304,
+  "herbie_err": 2.1876718216867735e-16,
+  "ours_err": 2.4652275778430627e-16
+ },
+ {
+  "name": "sq_diff",
+  "herbie_form": "fma(y, (x - y), ((x - y) * x))",
+  "ours_form": "fma(x, (x - y), (y * (x - y)))",
+  "herbie_ms": 0.5087,
+  "ours_ms": 0.5086,
+  "speedup": 1.0001966181675186,
+  "herbie_err": 3.0635611053639727e-09,
+  "ours_err": 3.0635611053639727e-09
+ }
+]
