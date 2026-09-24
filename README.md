@@ -1,4 +1,4 @@
-# pareto-fp
+# pareto-fp (research)
 
 Rewrites a floating-point expression into an equivalent one that is more accurate, often faster, and comes with a **proven upper bound on the error**.
 
