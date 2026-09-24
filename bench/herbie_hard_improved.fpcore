@@ -1,4 +1,4 @@
-;; seed: 184223076
+;; seed: 576970496
 
 (FPCore (b a c)
   :name "quadratic_root"
@@ -7,7 +7,7 @@
           (and (<= 1 a) (<= a 10000001/10000000)))
      (and (<= 1 c) (<= c 2)))
   :spec (/ (+ (neg b) (sqrt (- (* b b) (* (* 4 a) c)))) (* 2 a))
-  (/ (- (fma (/ (* c c) (* b b)) a c)) b))
+  (- (/ (* (* (- a) c) c) (* (* b b) b)) (/ c b)))
 (FPCore (a b c)
   :name "variance"
   :precision binary64
@@ -17,20 +17,30 @@
   :spec (-
  (/ (+ (+ (* a a) (* b b)) (* c c)) 3)
  (* (/ (+ (+ a b) c) 3) (/ (+ (+ a b) c) 3)))
-  (*
- 0.3333333333333333
+  (/
  (fma
-  (+ (+ (fmin (fmax a b) c) (fmin a b)) (fmax (fmax a b) c))
-  (+
-   (+ (/ (fmin (fmax a b) c) -3.0) (/ (fmin a b) -3.0))
-   (/ (fmax (fmax a b) c) -3.0))
   (fma
-   (fmax (fmax a b) c)
-   (fmax (fmax a b) c)
+   3.0
+   (fmin (fmin a b) c)
    (fma
-    (fmin (fmax a b) c)
-    (fmin (fmax a b) c)
-    (* (fmin a b) (fmin a b)))))))
+    3.0
+    (fmin (fmax a b) (fmax (fmin a b) c))
+    (* 3.0 (fmax (fmax a b) (fmax (fmin a b) c)))))
+  (+
+   (+ (fmin (fmax a b) (fmax (fmin a b) c)) (fmin (fmin a b) c))
+   (fmax (fmax a b) (fmax (fmin a b) c)))
+  (*
+   -9.0
+   (fma
+    (fma
+     (fmin (fmax a b) (fmax (fmin a b) c))
+     (fmin (fmax a b) (fmax (fmin a b) c))
+     (* (fmin (fmin a b) c) (fmin (fmin a b) c)))
+    1.0
+    (*
+     (fmax (fmax a b) (fmax (fmin a b) c))
+     (fmax (fmax a b) (fmax (fmin a b) c))))))
+ -27.0))
 (FPCore (a b)
   :name "sq_expand"
   :precision binary64
@@ -44,7 +54,7 @@
   :pre (and (and (<= 1000 x) (<= x 1000001/1000))
      (and (<= 999999/1000 y) (<= y 1000)))
   :spec (- (* (* x x) x) (* (* y y) y))
-  (fma (fma y y (* y x)) (- x y) (* (* x x) (- x y))))
+  (fma (- x y) (fma y y (* x x)) (* (- x y) (* y x))))
 (FPCore (x)
   :name "exp_minus_one"
   :precision binary64
@@ -70,19 +80,23 @@
    (/ (* (* (* (* x x) x) x) x) 120))
   (/ (* (* (* (* (* x x) x) x) x) x) 720))
  (/ (* (* (* (* (* (* x x) x) x) x) x) x) 5040))
-  (+
- (+
   (fma
+ x
+ (fma
+  (*
+   (* (fma 0.0001984126984126984 x 0.001388888888888889) x)
+   (* (* x x) x))
+  x
+  (fma
+   x
    (fma
     x
     (fma
-     (fma 0.0001984126984126984 x 0.001388888888888889)
+     (fma 0.008333333333333333 x 0.041666666666666664)
      x
-     0.008333333333333333)
-    0.041666666666666664)
-   (* (* (* x x) x) x)
-   (* (fma 0.16666666666666666 x 0.5) (* x x)))
-  x)
+     0.16666666666666666)
+    0.5)
+   1.0))
  1.0))
 (FPCore (x y)
   :name "hypot"

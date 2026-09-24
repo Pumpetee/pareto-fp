@@ -28,6 +28,9 @@ COST = {
     # только когда реально окупается точностью. Машина с разрешённой FMA — ставь
     # PARETO_FMA_COST=1.0 и получай схемы Горнера на fma.
     'fma': float(os.environ.get('PARETO_FMA_COST', 2.4)),
+    # Библиотечные функции, которыми Herbie закрывает малые аргументы и переполнение.
+    # Стоят примерно как их обычные собратья: та же реализация плюс поправочный шаг.
+    'expm1': 22.0, 'log1p': 22.0, 'hypot': 12.0,
 }
 
 
@@ -65,6 +68,23 @@ def iv_log(a):
     return (math.log(a[0]), math.log(a[1]))
 
 
+def iv_expm1(a):
+    return (math.expm1(min(a[0], 700.0)), math.expm1(min(a[1], 700.0)))
+
+
+def iv_log1p(a):
+    if a[0] <= -1.0:
+        return (-INF, INF)
+    return (math.log1p(a[0]), math.log1p(a[1]))
+
+
+def iv_hypot(a, b):
+    """Монотонна по |x| и |y|, поэтому границы берутся по модулям."""
+    lo = math.hypot(iv_abs_min(a), iv_abs_min(b))
+    hi = math.hypot(iv_abs_max(a), iv_abs_max(b))
+    return (lo, hi)
+
+
 def iv_abs_max(a):
     return max(abs(a[0]), abs(a[1]))
 
@@ -85,6 +105,9 @@ def eval_interval(op, kids):
     if op == 'exp': return iv_exp(kids[0])
     if op == 'log': return iv_log(kids[0])
     if op == 'fma': return iv_add(iv_mul(kids[0], kids[1]), kids[2])
+    if op == 'expm1': return iv_expm1(kids[0])
+    if op == 'log1p': return iv_log1p(kids[0])
+    if op == 'hypot': return iv_hypot(kids[0], kids[1])
     raise ValueError(op)
 
 
@@ -126,6 +149,23 @@ def propagate_error(op, kid_ivs, kid_errs, out_iv):
         if amin == 0.0:
             return INF
         return kid_errs[0] / amin + round_off
+    if op == 'expm1':
+        # производная expm1 это exp(x); на домене её максимум равен 1 + max|expm1|
+        a = kid_ivs[0]
+        slope = math.exp(min(iv_abs_max(a), 700.0))
+        return slope * kid_errs[0] + round_off
+    if op == 'log1p':
+        # производная 1/(1+x); знаменатель берём по наименьшему |1+x| на домене
+        a = kid_ivs[0]
+        dmin = iv_abs_min((1.0 + a[0], 1.0 + a[1]))
+        if dmin == 0.0:
+            return INF
+        return kid_errs[0] / dmin + round_off
+    if op == 'hypot':
+        # |d hypot / dx| <= 1 и |d hypot / dy| <= 1, поэтому ошибки просто складываются.
+        # Главное свойство: промежуточных квадратов нет, значит нет и переполнения,
+        # из-за которого sqrt(x*x + y*y) даёт бесконечность задолго до предела результата.
+        return kid_errs[0] + kid_errs[1] + round_off
     raise ValueError(op)
 
 

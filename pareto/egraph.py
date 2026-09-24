@@ -160,8 +160,71 @@ class EGraph:
         return self.add_node((pattern[0],) + kids)
 
     # ---------- насыщение ----------
+    def fold_constants(self):
+        """Считает узлы, у которых все аргументы — числа, и сливает их с результатом.
+
+        Без этого шага переписывание выдавало формы вроде `(2 + 2) * (b * a)`: сложение
+        двойки с двойкой выполнялось в рантайме на каждом вызове. Herbie на том же кейсе
+        отдавал `a * (4 * b)` и выигрывал у нас по стоимости на ровном месте — не лучшим
+        поиском, а тем, что не тащил в код арифметику, известную на этапе компиляции.
+        """
+        import math as _m
+
+        def value(eid):
+            for n in self.classes.get(self.uf.find(eid), ()):
+                if n[0] == 'num':
+                    return n[1]
+            return None
+
+        merged = 0
+        for eid in list(self.classes):
+            for n in list(self.classes.get(self.uf.find(eid), ())):
+                op = n[0]
+                if op in ('num', 'var'):
+                    continue
+                vals = [value(k) for k in n[1:]]
+                if any(v is None for v in vals):
+                    continue
+                try:
+                    if op == '+':
+                        r = vals[0] + vals[1]
+                    elif op == '-':
+                        r = vals[0] - vals[1]
+                    elif op == '*':
+                        r = vals[0] * vals[1]
+                    elif op == '/':
+                        r = vals[0] / vals[1]
+                    elif op == 'neg':
+                        r = -vals[0]
+                    elif op == 'sqrt':
+                        r = _m.sqrt(vals[0])
+                    elif op == 'exp':
+                        r = _m.exp(vals[0])
+                    elif op == 'log':
+                        r = _m.log(vals[0])
+                    elif op == 'expm1':
+                        r = _m.expm1(vals[0])
+                    elif op == 'log1p':
+                        r = _m.log1p(vals[0])
+                    elif op == 'hypot':
+                        r = _m.hypot(vals[0], vals[1])
+                    elif op == 'fma':
+                        r = vals[0] * vals[1] + vals[2]
+                    else:
+                        continue
+                except (ValueError, ZeroDivisionError, OverflowError):
+                    continue
+                if not _m.isfinite(r):
+                    continue
+                self.merge(self.uf.find(eid), self.add_node(('num', float(r))))
+                merged += 1
+        if merged:
+            self.rebuild()
+        return merged
+
     def saturate(self, rules, iters=8, node_limit=60000):
         """rules: список (lhs, rhs, двусторонее?) или (lhs, функция)."""
+        self.fold_constants()
         for _ in range(iters):
             matches = []
             for rule in rules:
@@ -182,6 +245,7 @@ class EGraph:
                     continue
                 self.merge(eid, new_id)
             self.rebuild()
+            self.fold_constants()      # правила рождают новые константные узлы каждый круг
             # рост считаем по факту: появились узлы или схлопнулись классы
             after_classes = len({self.uf.find(e) for e in self.classes})
             grew = (len(self.hashcons) != before_nodes) or (after_classes != before_classes)

@@ -12,7 +12,7 @@
 """
 from __future__ import annotations
 
-FUNCS = ('sqrt', 'exp', 'log')
+FUNCS = ('sqrt', 'exp', 'log', 'expm1', 'log1p')
 
 
 class ParseError(ValueError):
@@ -136,6 +136,13 @@ class _P:
             if self.peek() == ('op', '('):
                 # fma is three-argument: needed to read back forms that Herbie
                 # and our own extractor produce, not only to write them.
+                if v == 'hypot':
+                    self.take('op', '(')
+                    a = self.expr()
+                    self.take('op', ',')
+                    b = self.expr()
+                    self.take('op', ')')
+                    return ('hypot', a, b)
                 if v == 'fma':
                     self.take('op', '(')
                     a = self.expr()

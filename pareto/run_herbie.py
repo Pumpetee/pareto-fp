@@ -38,7 +38,11 @@ WORK = Path(tempfile.gettempdir()) / 'pareto_herbie'
 WORK.mkdir(parents=True, exist_ok=True)
 
 FPCORE_OPS = {'+': '+', '-': '-', '*': '*', '/': '/'}
-FPCORE_FUN = {'sqrt': 'sqrt', 'exp': 'exp', 'log': 'log'}
+# expm1/log1p/hypot читаются в обе стороны: раньше ответы Herbie с ними считались
+# «вне нашего подмножества», и сравнение молча теряло те самые кейсы, где он нас бил
+FPCORE_FUN = {'sqrt': 'sqrt', 'exp': 'exp', 'log': 'log',
+              'expm1': 'expm1', 'log1p': 'log1p'}
+FPCORE_BIN_FUN = {'hypot': 'hypot'}
 
 
 def find_racket():
@@ -64,6 +68,11 @@ def to_fpcore(tree):
         return '(- {})'.format(to_fpcore(tree[1]))
     if op in FPCORE_FUN:
         return '({} {})'.format(FPCORE_FUN[op], to_fpcore(tree[1]))
+    if op in FPCORE_BIN_FUN:
+        return '({} {} {})'.format(
+            FPCORE_BIN_FUN[op], to_fpcore(tree[1]), to_fpcore(tree[2]))
+    if op == 'fma':
+        return '(fma {} {} {})'.format(*[to_fpcore(k) for k in tree[1:]])
     return '({} {} {})'.format(FPCORE_OPS[op], to_fpcore(tree[1]), to_fpcore(tree[2]))
 
 
@@ -111,24 +120,37 @@ def sexp_to_tree(node):
         return (head, args[0])
     if head == 'fma' and len(args) == 3:
         return ('fma', args[0], args[1], args[2])
-    return None       # let*, if, log1p, expm1 и прочее вне нашего подмножества
+    if head in FPCORE_BIN_FUN and len(args) == 2:
+        return (head, args[0], args[1])
+    return None       # let*, if и прочее вне нашего подмножества
 
 
 def herbie_body(text, name):
-    """Из выданного Herbie FPCore достаём тело нужной функции."""
+    """Из выданного Herbie FPCore достаём тело нужной функции.
+
+    Имя ищется строго по полю `:name "X"` внутри разобранного блока, а не по первым
+    шестидесяти токенам исходного текста. Старый способ промахивался на кейсах с
+    широким доменом: границы вида 1e150 Herbie печатает целым числом на полторы сотни
+    цифр, окно уезжает, и телом `exp_series` в отчёте оказался `log1p(x)` из соседнего
+    блока. Сравнение с чужим инструментом по перепутанным формам хуже, чем его
+    отсутствие.
+    """
     for m in re.finditer(r'\(FPCore', text):
-        chunk = text[m.start():]
-        node, _ = parse_sexp(sexp_tokens(chunk))
+        node, _ = parse_sexp(sexp_tokens(text[m.start():]))
         if not isinstance(node, list) or node[0] != 'FPCore':
             continue
-        flat = ' '.join(x for x in sexp_tokens(chunk)[:60])
-        if '"{}"'.format(name) not in flat and name not in flat:
+        found = None
+        for i, tok in enumerate(node):
+            if tok == ':name' and i + 1 < len(node):
+                found = str(node[i + 1]).strip('"')
+                break
+        if found != name:
             continue
         return node[-1]
     return None
 
 
-def run(names):
+def run(names, prefix='herbie'):
     racket = find_racket()
     src = WORK / 'cases.fpcore'
     out = WORK / 'improved.fpcore'
@@ -139,8 +161,10 @@ def run(names):
     if r.returncode != 0 or not out.exists():
         raise RuntimeError('herbie improve: ' + ((r.stderr or r.stdout or '')[-2500:]))
     text = out.read_text(encoding='utf-8')
-    shutil.copy(src, BENCH / 'herbie_cases.fpcore')
-    shutil.copy(out, BENCH / 'herbie_improved.fpcore')
+    # префикс разводит полигоны: прогон трудного набора не должен затирать
+    # результаты обычного, они нужны обоим отчётам одновременно
+    shutil.copy(src, BENCH / (prefix + '_cases.fpcore'))
+    shutil.copy(out, BENCH / (prefix + '_improved.fpcore'))
 
     rows = []
     for name in names:
@@ -223,14 +247,11 @@ if __name__ == '__main__':
         names = args or [n for n in CASES if n not in getattr(sys.modules.get(
             'pareto.hard_cases', object), 'HARD_CASES', {})]
         BENCH_PREFIX = 'herbie'
-    rows = run(names)
+    rows = run(names, BENCH_PREFIX)
     text = fmt(rows)
     print(text)
     (BENCH / (BENCH_PREFIX + '_report.txt')).write_text(text + '\n', encoding='utf-8')
     (BENCH / (BENCH_PREFIX + '_results.json')).write_text(
         json.dumps(rows, ensure_ascii=False, indent=1, default=float), encoding='utf-8')
-    print('\nотчёт:', BENCH / (BENCH_PREFIX + '_report.txt'))
-    (BENCH / 'herbie_results.json').write_text(
-        json.dumps(rows, ensure_ascii=False, indent=2, default=str), encoding='utf-8')
-    (BENCH / 'herbie_report.txt').write_text(fmt(rows), encoding='utf-8')
-    print('отчёт: bench/herbie_report.txt · формулы: bench/herbie_improved.fpcore')
+    print('\nотчёт:', BENCH / (BENCH_PREFIX + '_report.txt'),
+          '· формулы:', BENCH / (BENCH_PREFIX + '_improved.fpcore'))
