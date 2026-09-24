@@ -7,16 +7,19 @@ Today a compiler gives you two options: keep the exact order of operations and s
 ```
 $ python -m pareto.cli "x*x - y*y" --domain x=1..2 --domain y=1..2
 
-input expression : ((x * x) - (y * y))
-model cost: 5.0 · error bound: 8.882e-16
+input expression: ((x * x) - (y * y))
+model cost: 5.0 | proven error bound: 8.882e-16
 
-Pareto front (non-dominated forms):
-     cost        error  form
+Pareto front (every non-dominated form):
+     cost        bound  form
       5.0    0.000e+00  ((x + y) * (x - y))
 
-fastest        : ((x + y) * (x - y))
-most accurate  : ((x + y) * (x - y))
-paste into code: ((x + y) * (x - y))
+cheapest form   : ((x + y) * (x - y))
+                  1.00x cheaper, error bound 0.000e+00
+most accurate   : ((x + y) * (x - y))
+                  model error is zero, costs 1.00x
+
+paste into code : ((x + y) * (x - y))
 ```
 
 ## Why this is not just `-ffast-math`
