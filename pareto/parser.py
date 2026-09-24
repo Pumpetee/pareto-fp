@@ -53,7 +53,7 @@ def tokenize(s):
             out.append(('op', '^'))
             i += 2
             continue
-        if c in '+-*/^()':
+        if c in '+-*/^(),':
             out.append(('op', c))
             i += 1
             continue
@@ -134,8 +134,20 @@ class _P:
         if k == 'name':
             self.take('name')
             if self.peek() == ('op', '('):
+                # fma is three-argument: needed to read back forms that Herbie
+                # and our own extractor produce, not only to write them.
+                if v == 'fma':
+                    self.take('op', '(')
+                    a = self.expr()
+                    self.take('op', ',')
+                    b = self.expr()
+                    self.take('op', ',')
+                    c = self.expr()
+                    self.take('op', ')')
+                    return ('fma', a, b, c)
                 if v not in FUNCS:
-                    raise ParseError('function {} is not supported, available: {}'.format(v, ', '.join(FUNCS)))
+                    raise ParseError('function {} is not supported, available: {}'.format(
+                        v, ', '.join(FUNCS + ('fma',))))
                 self.take('op', '(')
                 arg = self.expr()
                 self.take('op', ')')

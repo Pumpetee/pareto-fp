@@ -1,0 +1,37 @@
+How far the proven bound sits above the error that actually occurs.
+600 random points per form plus both domain corners, fixed seed.
+
+BENCHMARK CASES
+case                     bound    measured   loose by  form
+diff_sqrt             6.25e-11    3.53e-12      x17.7  (sqrt((x + 1)) - sqrt(x))
+diff_sqrt             1.74e-17    2.63e-20       x664  (1 / (sqrt((x + 1)) + sqrt(x)))
+poly                  2.82e-14    1.17e-14      x2.42  (((x * x) * ((4.5 * x) + 3.5)) + (1.5 + (x *
+poly                  2.76e-14    1.06e-14      x2.62  (((x * x) * ((4.5 * x) + 3.5)) + fma(2.5, x,
+poly                  2.26e-14    8.78e-15      x2.58  fma((x * x), ((4.5 * x) + 3.5), (1.5 + (x * 
+poly                  1.87e-14    7.37e-15      x2.53  fma((x * x), fma(x, 4.5, 3.5), (1.5 + (x * 2
+two_div               3.45e-16    1.65e-16      x2.09  ((a + b) / c)
+two_div               2.96e-16    2.05e-16      x1.44  ((b / c) + (a / c))
+div_chain             3.85e-17    1.46e-17      x2.63  (a / (b * c))
+div_chain             3.26e-17    1.65e-17      x1.97  ((a / b) / c)
+log_ratio             7.99e-16    5.16e-16      x1.55  log((a / b))
+exp_sum               3.03e-14    1.12e-14       x2.7  exp((b + a))
+exp_sum               1.82e-14    7.63e-15      x2.38  (exp(a) * exp(b))
+sq_diff               6.66e-16    4.39e-16      x1.52  ((x - y) * (y + x))
+sq_diff               5.55e-16    3.14e-16      x1.77  fma(x, (x - y), (y * (x - y)))
+
+ADVERSARIAL: the same variable repeated (worst case for intervals)
+case                     bound    measured   loose by  form
+x_minus_x (as written)    0.00e+00    0.00e+00      exact  (x - x)
+x_minus_x             0.00e+00    0.00e+00      exact  0
+x_over_x (as written)    2.22e-16    0.00e+00      exact  (x / x)
+x_over_x              0.00e+00    0.00e+00      exact  1
+sq_minus_sq (as written)    8.88e-16    0.00e+00      exact  ((x * x) - (x * x))
+sq_minus_sq           0.00e+00    0.00e+00      exact  0
+x_times_x_over_x (as written)    1.33e-15    2.22e-16         x6  ((x * x) / x)
+x_times_x_over_x      0.00e+00    0.00e+00      exact  x
+diff_same_sqrt (as written)    4.44e-16    0.00e+00      exact  (sqrt(x) - sqrt(x))
+diff_same_sqrt        0.00e+00    0.00e+00      exact  0
+
+benchmark cases: 15 forms, bound never below the measured error,
+  looseness from x1.44 to x664, median x2.42.
+"exact" means the form is exact on every point sampled, so the ratio is undefined.

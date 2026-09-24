@@ -27,21 +27,36 @@ jobs:
         run: python -m pareto.cli "x*x - y*y" --domain x=1..2 --domain y=1..2
 
   benchmark:
-    # Замеры требуют clang, поэтому отдельной работой и только на Linux.
-    runs-on: ubuntu-latest
+    # Timings need clang, so this is a separate job. Two architectures on purpose:
+    # ubuntu is x86-64, macos-latest is arm64. A speed ratio that only exists on
+    # one machine is not a result, and the obvious objection to numbers from a
+    # single thermally limited laptop is a fair one.
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: clang version
-        run: clang --version
+      - name: machine and clang version
+        run: |
+          uname -m
+          clang --version
       - name: fair benchmark against -O3 and -ffast-math
         run: python pareto/run_fairbench.py
+      - name: how loose the proven bound is
+        run: python pareto/run_tightness.py
+      - name: head-to-head on Herbie's own metric
+        run: python pareto/run_herbie_metric.py
       - name: publish raw numbers
         uses: actions/upload-artifact@v4
         with:
-          name: benchmark-results
+          name: benchmark-results-${{ matrix.os }}
           path: |
             bench/fair_report.txt
             bench/fair_results.json
+            bench/tightness_report.txt
+            bench/herbie_metric_report.txt

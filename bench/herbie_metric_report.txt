@@ -1,0 +1,36 @@
+Head-to-head on HERBIE'S metric: average bits of error over 4000 sampled inputs (lower is better).
+Reference: 60-digit Decimal evaluation of the original expression, rounded to double.
+
+case          original      ours    herbie   verdict
+diff_sqrt       27.197     0.319     0.331   tie
+poly             0.328     0.283     0.214   HERBIE BETTER
+two_div          0.254     0.254     0.216   tie
+div_chain        0.267     0.267     0.267   tie
+log_ratio        0.344     0.064     0.064   tie
+exp_sum          0.352     0.352     0.348   tie
+sq_diff         16.476     0.122     0.130   tie
+
+ours better on 0, tie on 6, Herbie better on 1 out of 7 cases.
+
+Forms compared:
+  diff_sqrt
+    ours  : (1 / (sqrt(x) + sqrt((x + 1))))
+    herbie: (1 / (sqrt(x) + sqrt((x * ((1 + x) / x)))))
+  poly
+    ours  : fma(fma(fma(4.5, x, 3.5), x, 2.5), x, 1.5)
+    herbie: fma(x, fma((4.5 * x), x, 2.5), fma((3.5 * x), x, 1.5))
+  two_div
+    ours  : ((b / c) + (a / c))
+    herbie: fma(a, (1 / c), (b / c))
+  div_chain
+    ours  : ((a / b) / c)
+    herbie: ((a / b) / c)
+  log_ratio
+    ours  : log((a / b))
+    herbie: log((a / b))
+  exp_sum
+    ours  : (exp(b) * exp(a))
+    herbie: (exp(b) / exp(-a))
+  sq_diff
+    ours  : fma(x, (x - y), (y * (x - y)))
+    herbie: fma(y, (x - y), ((x - y) * x))

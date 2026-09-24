@@ -1,0 +1,206 @@
+{
+ "cases": [
+  {
+   "case": "diff_sqrt",
+   "form": "(sqrt((x + 1)) - sqrt(x))",
+   "cost": 28.0,
+   "bound": 6.25327905256341e-11,
+   "measured": 3.527657734582078e-12,
+   "ratio": 17.72643358016771
+  },
+  {
+   "case": "diff_sqrt",
+   "form": "(1 / (sqrt((x + 1)) + sqrt(x)))",
+   "cost": 40.0,
+   "bound": 1.7444116795314816e-17,
+   "measured": 2.628701946811839e-20,
+   "ratio": 663.6019278059088
+  },
+  {
+   "case": "poly",
+   "form": "(((x * x) * ((4.5 * x) + 3.5)) + (1.5 + (x * 2.5)))",
+   "cost": 11.0,
+   "bound": 2.8199664825478976e-14,
+   "measured": 1.1652385466317123e-14,
+   "ratio": 2.4200765505907884
+  },
+  {
+   "case": "poly",
+   "form": "(((x * x) * ((4.5 * x) + 3.5)) + fma(2.5, x, 1.5))",
+   "cost": 11.4,
+   "bound": 2.7644553313166398e-14,
+   "measured": 1.0570271812039219e-14,
+   "ratio": 2.6153114891217926
+  },
+  {
+   "case": "poly",
+   "form": "fma((x * x), ((4.5 * x) + 3.5), (1.5 + (x * 2.5)))",
+   "cost": 11.8,
+   "bound": 2.2648549702353193e-14,
+   "measured": 8.781708922210943e-15,
+   "ratio": 2.579059486368291
+  },
+  {
+   "case": "poly",
+   "form": "fma((x * x), fma(x, 4.5, 3.5), (1.5 + (x * 2.5)))",
+   "cost": 12.600000000000001,
+   "bound": 1.865174681370263e-14,
+   "measured": 7.367199699691991e-15,
+   "ratio": 2.531728142849504
+  },
+  {
+   "case": "two_div",
+   "form": "((a + b) / c)",
+   "cost": 14.0,
+   "bound": 3.454027187722709e-16,
+   "measured": 1.654452330841917e-16,
+   "ratio": 2.08771635382509
+  },
+  {
+   "case": "two_div",
+   "form": "((b / c) + (a / c))",
+   "cost": 20.0,
+   "bound": 2.9605947323337506e-16,
+   "measured": 2.0540654564546613e-16,
+   "ratio": 1.4413341712312169
+  },
+  {
+   "case": "div_chain",
+   "form": "(a / (b * c))",
+   "cost": 14.0,
+   "bound": 3.848773152033876e-17,
+   "measured": 1.46297578998069e-17,
+   "ratio": 2.6307838984024996
+  },
+  {
+   "case": "div_chain",
+   "form": "((a / b) / c)",
+   "cost": 24.0,
+   "bound": 3.256654205567126e-17,
+   "measured": 1.6510631248250808e-17,
+   "ratio": 1.972458930613054
+  },
+  {
+   "case": "log_ratio",
+   "form": "log((a / b))",
+   "cost": 52.0,
+   "bound": 7.99327834797295e-16,
+   "measured": 5.157618731335427e-16,
+   "ratio": 1.549800162507031
+  },
+  {
+   "case": "exp_sum",
+   "form": "exp((b + a))",
+   "cost": 42.0,
+   "bound": 3.030806163436774e-14,
+   "measured": 1.1206374721635604e-14,
+   "ratio": 2.7045375857237253
+  },
+  {
+   "case": "exp_sum",
+   "form": "(exp(a) * exp(b))",
+   "cost": 62.0,
+   "bound": 1.8184836980620645e-14,
+   "measured": 7.634504830329674e-15,
+   "ratio": 2.3819274969055697
+  },
+  {
+   "case": "sq_diff",
+   "form": "((x - y) * (y + x))",
+   "cost": 5.0,
+   "bound": 6.661341478262494e-16,
+   "measured": 4.3908310819462423e-16,
+   "ratio": 1.5171026518537454
+  },
+  {
+   "case": "sq_diff",
+   "form": "fma(x, (x - y), (y * (x - y)))",
+   "cost": 9.8,
+   "bound": 5.551117343440566e-16,
+   "measured": 3.137212204366468e-16,
+   "ratio": 1.7694427350863773
+  }
+ ],
+ "correlated": [
+  {
+   "case": "x_minus_x (as written)",
+   "form": "(x - x)",
+   "cost": 0.0,
+   "bound": 0.0,
+   "measured": 0.0,
+   "ratio": Infinity
+  },
+  {
+   "case": "x_minus_x",
+   "form": "0",
+   "cost": 0.0,
+   "bound": 0.0,
+   "measured": 0.0,
+   "ratio": Infinity
+  },
+  {
+   "case": "x_over_x (as written)",
+   "form": "(x / x)",
+   "cost": 0.0,
+   "bound": 2.220446049250313e-16,
+   "measured": 0.0,
+   "ratio": Infinity
+  },
+  {
+   "case": "x_over_x",
+   "form": "1",
+   "cost": 0.0,
+   "bound": 0.0,
+   "measured": 0.0,
+   "ratio": Infinity
+  },
+  {
+   "case": "sq_minus_sq (as written)",
+   "form": "((x * x) - (x * x))",
+   "cost": 0.0,
+   "bound": 8.881784197001252e-16,
+   "measured": 0.0,
+   "ratio": Infinity
+  },
+  {
+   "case": "sq_minus_sq",
+   "form": "0",
+   "cost": 0.0,
+   "bound": 0.0,
+   "measured": 0.0,
+   "ratio": Infinity
+  },
+  {
+   "case": "x_times_x_over_x (as written)",
+   "form": "((x * x) / x)",
+   "cost": 0.0,
+   "bound": 1.3322676295501878e-15,
+   "measured": 2.220446049250313e-16,
+   "ratio": 6.0
+  },
+  {
+   "case": "x_times_x_over_x",
+   "form": "x",
+   "cost": 0.0,
+   "bound": 0.0,
+   "measured": 0.0,
+   "ratio": Infinity
+  },
+  {
+   "case": "diff_same_sqrt (as written)",
+   "form": "(sqrt(x) - sqrt(x))",
+   "cost": 0.0,
+   "bound": 4.440892098500626e-16,
+   "measured": 0.0,
+   "ratio": Infinity
+  },
+  {
+   "case": "diff_same_sqrt",
+   "form": "0",
+   "cost": 0.0,
+   "bound": 0.0,
+   "measured": 0.0,
+   "ratio": Infinity
+  }
+ ]
+}

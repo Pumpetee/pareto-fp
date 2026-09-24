@@ -1,0 +1,128 @@
+[
+ {
+  "name": "diff_sqrt",
+  "original": {
+   "form": "(sqrt((x + 1)) - sqrt(x))",
+   "mean_bits": 27.197160691643628,
+   "worst_bits": 29.960116903069135
+  },
+  "ours": {
+   "form": "(1 / (sqrt(x) + sqrt((x + 1))))",
+   "mean_bits": 0.31930225625468744,
+   "worst_bits": 1.584962500721156
+  },
+  "herbie": {
+   "form": "(1 / (sqrt(x) + sqrt((x * ((1 + x) / x)))))",
+   "mean_bits": 0.33142970000576916,
+   "worst_bits": 1.584962500721156
+  }
+ },
+ {
+  "name": "poly",
+  "original": {
+   "form": "(((1.5 + (2.5 * x)) + (3.5 * (x * x))) + (4.5 * (x * (x * x))))",
+   "mean_bits": 0.32775488750216347,
+   "worst_bits": 1.584962500721156
+  },
+  "ours": {
+   "form": "fma(fma(fma(4.5, x, 3.5), x, 2.5), x, 1.5)",
+   "mean_bits": 0.2828349625007212,
+   "worst_bits": 1.584962500721156
+  },
+  "herbie": {
+   "form": "fma(x, fma((4.5 * x), x, 2.5), fma((3.5 * x), x, 1.5))",
+   "mean_bits": 0.2145,
+   "worst_bits": 1.0
+  }
+ },
+ {
+  "name": "two_div",
+  "original": {
+   "form": "((a / c) + (b / c))",
+   "mean_bits": 0.25425,
+   "worst_bits": 1.0
+  },
+  "ours": {
+   "form": "((b / c) + (a / c))",
+   "mean_bits": 0.25425,
+   "worst_bits": 1.0
+  },
+  "herbie": {
+   "form": "fma(a, (1 / c), (b / c))",
+   "mean_bits": 0.21625,
+   "worst_bits": 1.0
+  }
+ },
+ {
+  "name": "div_chain",
+  "original": {
+   "form": "((a / b) / c)",
+   "mean_bits": 0.267,
+   "worst_bits": 1.0
+  },
+  "ours": {
+   "form": "((a / b) / c)",
+   "mean_bits": 0.267,
+   "worst_bits": 1.0
+  },
+  "herbie": {
+   "form": "((a / b) / c)",
+   "mean_bits": 0.267,
+   "worst_bits": 1.0
+  }
+ },
+ {
+  "name": "log_ratio",
+  "original": {
+   "form": "(log(a) - log(b))",
+   "mean_bits": 0.34398120312590147,
+   "worst_bits": 1.584962500721156
+  },
+  "ours": {
+   "form": "log((a / b))",
+   "mean_bits": 0.0635,
+   "worst_bits": 1.0
+  },
+  "herbie": {
+   "form": "log((a / b))",
+   "mean_bits": 0.0635,
+   "worst_bits": 1.0
+  }
+ },
+ {
+  "name": "exp_sum",
+  "original": {
+   "form": "(exp(a) * exp(b))",
+   "mean_bits": 0.3516511281273437,
+   "worst_bits": 1.584962500721156
+  },
+  "ours": {
+   "form": "(exp(b) * exp(a))",
+   "mean_bits": 0.3516511281273437,
+   "worst_bits": 1.584962500721156
+  },
+  "herbie": {
+   "form": "(exp(b) / exp(-a))",
+   "mean_bits": 0.3484011281273437,
+   "worst_bits": 1.584962500721156
+  }
+ },
+ {
+  "name": "sq_diff",
+  "original": {
+   "form": "((x * x) - (y * y))",
+   "mean_bits": 16.47569494369589,
+   "worst_bits": 23.597305372104273
+  },
+  "ours": {
+   "form": "fma(x, (x - y), (y * (x - y)))",
+   "mean_bits": 0.122,
+   "worst_bits": 1.0
+  },
+  "herbie": {
+   "form": "fma(y, (x - y), ((x - y) * x))",
+   "mean_bits": 0.1295,
+   "worst_bits": 1.0
+  }
+ }
+]

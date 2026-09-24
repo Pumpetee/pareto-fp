@@ -102,19 +102,41 @@ Reports: `bench/mlir_report.txt`, `bench/mlir_results.json`. Generated modules a
 
 [Herbie](https://herbie.uwplse.org/) solves half of the same problem: it finds a numerically stable form, but it does not model cost and does not give a proven bound. Both tools were run on the same seven cases, and the forms Herbie produced were scored with our own model.
 
-**Read this section with that bias in mind.** Herbie optimises average error in bits over sampled inputs, while the table below scores its forms with our worst-case bound and our cost model. Winning under one's own metric is not winning. Treat this as "our front covers what Herbie returned, measured our way", not as a claim of superiority — a fair head-to-head needs Herbie's own metric as well, and that comparison is not done yet.
+### First, the comparison on Herbie's own ruler
 
-Comparing a single form against a whole front would be meaningless, so the question asked is different: **does our front contain a point that is no worse than Herbie's answer on both metrics at once?**
+Scoring someone else's tool with your own metric proves nothing, so the honest test is the reverse: measure both on **Herbie's** metric — average bits of error over sampled inputs, `log2(1 + ulp distance)` against a 60-digit reference rounded to double, 4000 points per case, fixed seed.
 
-| case | Herbie's form | our front covers it |
+| case | original | ours | Herbie | verdict |
+|---|---|---|---|---|
+| `diff_sqrt` | 27.197 | 0.319 | 0.331 | tie |
+| `poly` | 0.328 | 0.283 | **0.214** | **Herbie better** |
+| `two_div` | 0.254 | 0.254 | 0.216 | tie |
+| `div_chain` | 0.267 | 0.267 | 0.267 | tie |
+| `log_ratio` | 0.344 | 0.064 | 0.064 | tie |
+| `exp_sum` | 0.352 | 0.352 | 0.348 | tie |
+| `sq_diff` | 16.476 | 0.122 | 0.130 | tie |
+
+**On Herbie's metric this project wins nothing: six ties and one loss.** Both tools take the two catastrophic cases from tens of bits of error down to a fraction of a bit, and on the rest they land within noise of each other. Anyone told that this tool "beats Herbie on accuracy" was told something false.
+
+The actual difference is not accuracy, it is what you get back. Herbie returns one form with an empirical improvement and no guarantee. This returns the whole cost-versus-error front with a **statically proven worst-case bound** on every point, so a caller can say "give me the cheapest form that loses at most one bit" and have that hold for every input in the range, not on average over a sample. Reproduce with `python pareto/run_herbie_metric.py`, raw numbers in `bench/herbie_metric_report.txt`.
+
+Caveat worth naming: Herbie samples inputs over the floating-point representation, this script samples uniformly over the value range. On a wide domain like `1e6..1e9` those distributions differ.
+
+### Second, the front-coverage question
+
+A single form against a whole front is not a fair pairing either, so the other question asked is: **does our front contain a point no worse than Herbie's answer on both of our metrics at once?** Scored with our bound and our cost model — our ruler, stated plainly, so read it as coverage and not as superiority.
+
+| case | Herbie's form | covered by our front (our metrics) |
 |---|---|---|
-| `sqrt(x+1) - sqrt(x)` | `1 / fma(x, 1/sqrt(x), sqrt(1+x))` | **yes, strictly better** |
-| `2.5x³ + 3.5x² + …` (poly) | `fma(x, fma(4.5x, x, 2.5), fma(3.5x, x, 1.5))` | **yes, strictly better** |
-| `(a/c) + (b/c)` | `fma(a, 1/c, b/c)` | **yes, strictly better** |
+| `sqrt(x+1) - sqrt(x)` | `1 / fma(x, 1/sqrt(x), sqrt(1+x))` | yes, dominated on both |
+| `2.5x³ + 3.5x² + …` (poly) | `fma(x, fma(4.5x, x, 2.5), fma(3.5x, x, 1.5))` | yes, dominated on both |
+| `(a/c) + (b/c)` | `fma(a, 1/c, b/c)` | yes, dominated on both |
 | `(a/b)/c` | `(a/b)/c` | equal point, nothing better |
-| `log(a) - log(b)` | `log(a/b)` | **yes, strictly better** |
-| `exp(a) * exp(b)` | `exp(b) / exp(-a)` | **yes, strictly better** |
-| `x*x - y*y` | `fma(y, x-y, (x-y)*x)` | **yes, strictly better** |
+| `log(a) - log(b)` | `log(a/b)` | yes, dominated on both |
+| `exp(a) * exp(b)` | `exp(b) / exp(-a)` | yes, dominated on both |
+| `x*x - y*y` | `fma(y, x-y, (x-y)*x)` | yes, dominated on both |
+
+Note how differently the two tables read. Under our worst-case bound Herbie's forms look dominated everywhere; under his average-bits metric the same forms are level with ours. Both statements are true, and that gap is exactly what "choose your own metric" buys — which is why the first table is the one that counts.
 
 Reproduce: `raco pkg install --auto herbie`, then `python pareto/run_herbie.py`. Raw output in `bench/herbie_report.txt`, the FPCore files Herbie produced are kept in `bench/herbie_improved.fpcore`.
 
@@ -146,18 +168,50 @@ What is new is the combination: **both metrics computed together**, an error bud
 ## Limitations
 
 - Scalar expressions and array reductions only. No loops, no matrices, no memory effects — which is where most of the real-world win lives.
-- Interval arithmetic ignores correlation between occurrences of the same variable, so bounds are conservative.
-- Saturation blows up on expressions with roots: 6 nodes become 6056 after saturation. Bounded by `node_limit`.
 - Supported functions: `sqrt`, `exp`, `log`, `fma`, plus `+ - * /` and integer powers.
 - On Windows, `mlir-opt` refuses paths containing non-ASCII characters, so the MLIR pipeline stages its files in a temporary directory.
-- Timings come from a single laptop CPU (Ryzen 5 5500U, 15 W, thermally limited). Treat the speed ratios as orders of magnitude, not exact figures, and re-run them on your own machine.
+- Timings in the tables were taken on a single laptop CPU (Ryzen 5 5500U, 15 W, thermally limited). CI re-runs the same benchmark on two architectures — Linux x86-64 and macOS arm64 — and publishes the raw numbers as artifacts, so the ratios can be checked on hardware that is not mine. Accuracy figures are bit-for-bit identical everywhere, as IEEE arithmetic requires; only the speed ratios move.
 - The cost model uses operation weights, not measured latency, and the `fma` weight is calibrated on that same laptop. On different hardware the ordering of points on the front can change.
+- Interval arithmetic ignores correlation between repeated variables, so bounds are conservative — measured at median x2.42, see "How loose is the bound".
+- Saturation on expressions with roots reaches thousands of nodes and extraction takes seconds, see "What the search costs".
 
 ## The bound is tested, not asserted
 
 `tests/test_bound.py` rebuilds the Pareto front and checks, on every form it finds, that the error actually measured against a 60-digit `Decimal` reference never exceeds the bound the analysis proved. Inputs are drawn pseudo-randomly with a fixed seed plus the domain corners — deliberately not a uniform grid, since cancellation lives in narrow spots a grid can step over.
 
-The margin today ranges from 1.6x to 400x, so the test is tight enough to notice a regression: halving any bound makes it fail.
+### How loose is the bound
+
+Interval arithmetic ignores correlation between repeated occurrences of the same variable, so the bound is conservative by construction. That is a real weakness and it deserves a number rather than a disclaimer, so `pareto/run_tightness.py` measures it: proven bound divided by the largest error observed over 600 random points plus both corners.
+
+Across the 15 forms on the benchmark fronts: **never below the measured error, looseness from x1.44 to x664, median x2.42.** A factor of two or three is the normal price of a worst-case guarantee; the x664 outlier is the most accurate `diff_sqrt` form, where the real error is near zero and any bound looks huge next to it.
+
+The adversarial group is the interesting one — expressions where the same variable repeats, the worst case for intervals:
+
+| expression | bound as written | real error | after rewriting |
+|---|---|---|---|
+| `x / x` | 2.22e-16 | 0 | `1`, bound 0 |
+| `x*x - x*x` | 8.88e-16 | 0 | `0`, bound 0 |
+| `(x*x) / x` | 1.33e-15 | 2.22e-16 (x6 loose) | `x`, bound 0 |
+| `sqrt(x) - sqrt(x)` | 4.44e-16 | 0 | `0`, bound 0 |
+
+So the criticism lands and then partly answers itself: the analysis alone cannot see that `x/x` is exactly one, but rewriting collapses exactly those self-cancelling patterns, and the bound on the resulting form is not conservative — it is zero. What remains conservative is the case of a variable repeated in a form that cannot be collapsed, and there the measured price is around x6.
+
+The test is tight enough to catch a regression: halving any bound makes it fail.
+
+## What the search costs
+
+E-graph saturation blows up, and the number worth knowing is how much. Measured on the seven benchmark cases:
+
+| case | nodes after saturation | classes | front | saturate | extract |
+|---|---|---|---|---|---|
+| `diff_sqrt` | 6056 | 714 | 2 | 1.75 s | 6.18 s |
+| `sq_diff` | 434 | 100 | 2 | 0.05 s | 0.04 s |
+| `poly` | 236 | 29 | 6 | 0.04 s | 0.03 s |
+| the other four | 9–10 | 6–7 | 1–2 | < 0.01 s | < 0.01 s |
+
+Roots are the blow-up: six nodes become 6056, a thousandfold, and extraction — not saturation — becomes the bottleneck, since every class carries its own front of non-dominated points. The `node_limit` of 60000 was not reached on any case, so nothing here is truncated.
+
+Eight seconds to analyse one numerical kernel is acceptable. Eight seconds per expression inside a compiler pass over a whole translation unit is not, and that is the honest reason this is a tool you point at a hot kernel today rather than a pass you enable globally.
 
 ## Status
 
