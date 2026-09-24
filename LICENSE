@@ -3,7 +3,7 @@ pareto-fp is under the Apache License v2.0 with LLVM Exceptions,
 the same license as the LLVM Project, so that the pass can go upstream as is.
 ==============================================================================
 
-Copyright (c) 2026 PARETO-FP contributors
+Copyright (c) 2026 Anton Sannikov
 
 
                                  Apache License
