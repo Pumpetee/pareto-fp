@@ -210,9 +210,26 @@ def fmt(rows):
 
 
 if __name__ == '__main__':
-    names = sys.argv[1:] or list(CASES)
+    # --hard переключает на трудный полигон: на исходных семи кейсах оба инструмента
+    # упираются в пол двойной точности, и сравнение там меряет шум, а не качество.
+    args = sys.argv[1:]
+    if '--hard' in args:
+        args.remove('--hard')
+        from pareto.hard_cases import HARD_CASES
+        CASES.update(HARD_CASES)
+        names = args or list(HARD_CASES)
+        BENCH_PREFIX = 'herbie_hard'
+    else:
+        names = args or [n for n in CASES if n not in getattr(sys.modules.get(
+            'pareto.hard_cases', object), 'HARD_CASES', {})]
+        BENCH_PREFIX = 'herbie'
     rows = run(names)
-    print(fmt(rows))
+    text = fmt(rows)
+    print(text)
+    (BENCH / (BENCH_PREFIX + '_report.txt')).write_text(text + '\n', encoding='utf-8')
+    (BENCH / (BENCH_PREFIX + '_results.json')).write_text(
+        json.dumps(rows, ensure_ascii=False, indent=1, default=float), encoding='utf-8')
+    print('\nотчёт:', BENCH / (BENCH_PREFIX + '_report.txt'))
     (BENCH / 'herbie_results.json').write_text(
         json.dumps(rows, ensure_ascii=False, indent=2, default=str), encoding='utf-8')
     (BENCH / 'herbie_report.txt').write_text(fmt(rows), encoding='utf-8')

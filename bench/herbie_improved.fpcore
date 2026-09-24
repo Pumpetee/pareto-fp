@@ -1,47 +1,111 @@
-;; seed: 587412172
+;; seed: 494058412
 
-(FPCore (x)
-  :name "diff_sqrt"
+(FPCore (b a c)
+  :name "quadratic_root"
   :precision binary64
-  :pre (and (<= 1000000 x) (<= x 1000000000))
-  :spec (- (sqrt (+ x 1)) (sqrt x))
-  (/ 1.0 (+ (sqrt x) (sqrt (* x (/ (+ 1.0 x) x))))))
-(FPCore (x)
-  :name "poly"
-  :precision binary64
-  :pre (and (<= 1/2 x) (<= x 2))
-  :spec (+ (+ (+ 3/2 (* 5/2 x)) (* 7/2 (* x x))) (* 9/2 (* x (* x x))))
-  (fma x (fma (* 4.5 x) x 2.5) (fma (* 3.5 x) x 1.5)))
-(FPCore (a c b)
-  :name "two_div"
-  :precision binary64
-  :pre (and (and (and (<= 1 a) (<= a 2)) (and (<= 3 c) (<= c 4)))
-     (and (<= 1 b) (<= b 2)))
-  :spec (+ (/ a c) (/ b c))
-  (fma a (/ 1.0 c) (/ b c)))
+  :pre (and (and (and (<= 10000000 b) (<= b 100000000))
+          (and (<= 1 a) (<= a 10000001/10000000)))
+     (and (<= 1 c) (<= c 2)))
+  :spec (/ (+ (neg b) (sqrt (- (* b b) (* (* 4 a) c)))) (* 2 a))
+  (/ (- (fma (/ (* c c) (* b b)) a c)) b))
 (FPCore (a b c)
-  :name "div_chain"
+  :name "variance"
   :precision binary64
-  :pre (and (and (and (<= 1 a) (<= a 2)) (and (<= 3 b) (<= b 4)))
-     (and (<= 5 c) (<= c 6)))
-  :spec (/ (/ a b) c)
-  (/ (/ a b) c))
+  :pre (and (and (and (<= 1000000 a) (<= a 1000001))
+          (and (<= 1000000 b) (<= b 1000001)))
+     (and (<= 1000000 c) (<= c 1000001)))
+  :spec (-
+ (/ (+ (+ (* a a) (* b b)) (* c c)) 3)
+ (* (/ (+ (+ a b) c) 3) (/ (+ (+ a b) c) 3)))
+  (/
+ (fma
+  (fma
+   9.0
+   (fmax a b)
+   (fma 9.0 (fmin (fmin a b) c) (* 9.0 (fmax (fmin a b) c))))
+  (+ (+ (fmax a b) (fmin (fmin a b) c)) (fmax (fmin a b) c))
+  (*
+   -27.0
+   (fma
+    (fmax (fmin a b) c)
+    (fmax (fmin a b) c)
+    (fma
+     (fmax a b)
+     (fmax a b)
+     (* (fmin (fmin a b) c) (fmin (fmin a b) c))))))
+ -81.0))
 (FPCore (a b)
-  :name "log_ratio"
+  :name "sq_expand"
   :precision binary64
-  :pre (and (and (<= 100 a) (<= a 200)) (and (<= 2 b) (<= b 3)))
-  :spec (- (log a) (log b))
-  (log (/ a b)))
-(FPCore (a b)
-  :name "exp_sum"
-  :precision binary64
-  :pre (and (and (<= 1/10 a) (<= a 2)) (and (<= 1/10 b) (<= b 2)))
-  :spec (* (exp a) (exp b))
-  (/ (exp b) (exp (- a))))
+  :pre (and (and (<= 100000 a) (<= a 1000000))
+     (and (<= 1/1000000 b) (<= b 1/100000)))
+  :spec (- (* (+ a b) (+ a b)) (* (- a b) (- a b)))
+  (* a (* 4.0 b)))
 (FPCore (x y)
-  :name "sq_diff"
+  :name "cube_diff"
   :precision binary64
   :pre (and (and (<= 1000 x) (<= x 1000001/1000))
      (and (<= 999999/1000 y) (<= y 1000)))
-  :spec (- (* x x) (* y y))
-  (fma y (- x y) (* (- x y) x)))
+  :spec (- (* (* x x) x) (* (* y y) y))
+  (fma (- x y) (fma y y (* x x)) (* (- x y) (* y x))))
+(FPCore (x)
+  :name "exp_minus_one"
+  :precision binary64
+  :pre (and (<= 1/1000000000000 x) (<= x 1/1000000))
+  :spec (- (exp x) 1)
+  (fma 2.0 (* 0.25 (* x x)) (fma 0.16666666666666666 (* (* x x) x) x)))
+(FPCore (x)
+  :name "log_one_plus"
+  :precision binary64
+  :pre (and (<= 1/1000000000000 x) (<= x 1/1000000))
+  :spec (log (+ 1 x))
+  (log1p x))
+(FPCore (x)
+  :name "exp_series"
+  :precision binary64
+  :pre (and (<= 1/10 x) (<= x 3))
+  :spec (+
+ (+
+  (+
+   (+
+    (+ (+ (+ 1 (/ x 1)) (/ (* x x) 2)) (/ (* (* x x) x) 6))
+    (/ (* (* (* x x) x) x) 24))
+   (/ (* (* (* (* x x) x) x) x) 120))
+  (/ (* (* (* (* (* x x) x) x) x) x) 720))
+ (/ (* (* (* (* (* (* x x) x) x) x) x) x) 5040))
+  (fma
+ x
+ (fma
+  (* (* (fma 0.0001984126984126984 x 0.001388888888888889) x) x)
+  (* (* x x) x)
+  (fma
+   x
+   (fma
+    (* (fma 0.008333333333333333 x 0.041666666666666664) x)
+    x
+    (fma 0.16666666666666666 x 0.5))
+   1.0))
+ 1.0))
+(FPCore (x y)
+  :name "hypot"
+  :precision binary64
+  :pre (and (and (<=
+           1000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+           x)
+          (<=
+           x
+           100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000))
+     (and (<=
+           1000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000
+           y)
+          (<=
+           y
+           100000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000)))
+  :spec (sqrt (+ (* x x) (* y y)))
+  (hypot x y))
+(FPCore (x)
+  :name "ratio_cancel"
+  :precision binary64
+  :pre (and (<= 10000001/10000000 x) (<= x 1001/1000))
+  :spec (/ (- (* x x) 1) (- x 1))
+  (+ 1.0 x))

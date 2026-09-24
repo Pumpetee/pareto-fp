@@ -252,4 +252,30 @@ def pareto_extract(eg, root, domain, keep=8, rounds=10):
                 front[r] = cur
         if not changed:
             break
-    return front.get(eg.uf.find(root), []), iv
+
+    # Пересчёт границ по извлечённым деревьям.
+    #
+    # Снизу вверх ошибка копится по e-КЛАССАМ, а интервал класса общий для всех
+    # эквивалентных форм внутри него — то есть для конкретного дерева он может быть
+    # и шире, и уже нужного. Расхождение измерено 25.09.2026: на (a+b)^2-(a-b)^2
+    # фронт приписывал форме 4ab границу 1.2e+14 при честных 1.3e-14, а на формуле
+    # корней квадратного уравнения, наоборот, занижал в 16 раз. Ни разу не ниже
+    # реальной ошибки, но доверять несогласованным числам нельзя, и выбор формы по
+    # ним бессмысленен. Дерево уже собрано, поэтому просто считаем по нему честно.
+    out = []
+    for cost, err, tree, work, lat in front.get(eg.uf.find(root), []):
+        try:
+            c2, e2, _, w2, l2 = tree_cost(tree, domain)
+        except (ValueError, ZeroDivisionError, OverflowError):
+            out.append((cost, err, tree, work, lat))
+            continue
+        out.append((c2, e2, tree, w2, l2))
+
+    # после пересчёта часть точек может оказаться доминируемой — фронт пересобираем
+    final = []
+    for cost, err, tree, work, lat in sorted(out, key=lambda p: (p[0], p[1])):
+        if any(o[0] <= cost and o[1] <= err and (o[0] < cost or o[1] < err) for o in final):
+            continue
+        final = [o for o in final if not (cost <= o[0] and err <= o[1])]
+        final.append((cost, err, tree, work, lat))
+    return final, iv
