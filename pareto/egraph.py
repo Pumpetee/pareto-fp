@@ -16,7 +16,11 @@ from itertools import product
 # ('neg', a) | ('sqrt', a) | ('exp', a) | ('log', a)
 # ('var', 'x') | ('num', 2.0)
 
-LEAVES = ('var', 'num')
+# approx — приближение подвыражения рядом, несущее собственную погрешность метода.
+# Для e-графа это непрозрачный лист: внутрь правила не лезут (там уже не тождество),
+# зато алгебра работает ВОКРУГ него — и ровно это сокращает b - b в формуле корней
+# квадратного уравнения после подстановки ряда.
+LEAVES = ('var', 'num', 'approx')
 
 
 def is_leaf(e):
@@ -180,7 +184,7 @@ class EGraph:
         for eid in list(self.classes):
             for n in list(self.classes.get(self.uf.find(eid), ())):
                 op = n[0]
-                if op in ('num', 'var'):
+                if op in LEAVES:      # approx тоже лист: внутрь не лезем
                     continue
                 vals = [value(k) for k in n[1:]]
                 if any(v is None for v in vals):

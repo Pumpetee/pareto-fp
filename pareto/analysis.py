@@ -188,6 +188,15 @@ def class_intervals(eg, domain, rounds=6):
                     cand = (node[1], node[1])
                 elif node[0] == 'var':
                     cand = domain[node[1]]
+                elif node[0] == 'approx':
+                    # лист-приближение: интервал берём у его внутреннего дерева,
+                    # расширив на остаток метода в обе стороны
+                    try:
+                        _, _, inner_iv, _, _ = tree_cost(node[1], domain)
+                    except Exception:
+                        continue
+                    rem = float(node[2])
+                    cand = (inner_iv[0] - rem, inner_iv[1] + rem)
                 else:
                     kids = [iv.get(eg.uf.find(k)) for k in node[1:]]
                     if any(k is None for k in kids):
@@ -216,6 +225,13 @@ def tree_cost(tree, domain):
         return 0.0, 0.0, (v, v), 0.0, 0.0
     if op == 'var':
         return 0.0, 0.0, domain[tree[1]], 0.0, 0.0
+    if op == 'approx':
+        # ('approx', дерево, остаток) — приближение с собственной погрешностью метода.
+        # Нужен, чтобы разложить ПОДвыражение в ряд и честно протащить остаток наружу
+        # через всё оставшееся дерево: дальше он распространяется обычными правилами,
+        # как любая другая входная ошибка.
+        cost, err, iv, work, lat = tree_cost(tree[1], domain)
+        return cost, err + float(tree[2]), iv, work, lat
     kids = [tree_cost(k, domain) for k in tree[1:]]
     ivs = [k[2] for k in kids]
     out_iv = eval_interval(op, ivs)
@@ -245,7 +261,7 @@ def _insert(front, cost, err, tree, keep, work=0.0, lat=0.0):
     return front[:keep]
 
 
-def pareto_extract(eg, root, domain, keep=8, rounds=10):
+def pareto_extract(eg, root, domain, keep=8, rounds=10, series=True):
     """Для каждого класса — недоминируемые пары (стоимость, ошибка) с деревом."""
     iv = class_intervals(eg, domain)
     front = {}
@@ -314,14 +330,16 @@ def pareto_extract(eg, root, domain, keep=8, rounds=10):
     # Приближения рядом Тейлора добавляются кандидатами, а не сливаются с e-графом:
     # e-граф хранит тождества, а ряд тождеством не является. Их граница уже включает
     # остаточный член, поэтому сравнивать их с точными формами можно напрямую.
-    if out:
+    if out and series:
         from pareto.taylor import series_candidates
         # пробуем КАЖДУЮ форму фронта: разложение умеет раскрывать верхний узел, а
         # нужная запись может лежать любой точкой — expm1(x) и (exp(x) + -1) это
         # один класс, но разложить можно только первую
+        from pareto.taylor import rewrite_candidates
         extra = []
         for _, _, seed, _, _ in out:
             extra.extend(series_candidates(seed, domain))
+            extra.extend(rewrite_candidates(seed, domain))
         out.extend(extra)
 
     # после пересчёта часть точек может оказаться доминируемой — фронт пересобираем

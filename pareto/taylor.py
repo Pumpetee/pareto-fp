@@ -151,6 +151,208 @@ def _arg_interval(arg_tree, domain):
     return tree_cost(arg_tree, domain)[2]
 
 
+def _sqrt_shift_candidates(node, domain, orders):
+    """sqrt(u*u - v) при малом v/u² — разложение по малому параметру.
+
+    Классическая катастрофа численного анализа: в формуле корней квадратного
+    уравнения при b² >> 4ac разность -b + sqrt(b²-4ac) съедает все значащие цифры.
+    Алгебра тут бессильна, нужен ряд: sqrt(u²−v) = u·sqrt(1−t) при t = v/u², а
+    sqrt(1−t) раскладывается вокруг нуля. Остаток по Лагранжу умножается на |u| и
+    уезжает наружу в узле approx — дальше его протащит обычный анализ.
+    """
+    if node[0] != 'sqrt':
+        return []
+    inner = node[1]
+    if inner[0] not in ('-', '+'):
+        return []
+    sq, rest = inner[1], inner[2]
+    if not (sq[0] == '*' and sq[1] == sq[2]):
+        return []
+    u = sq[1]
+    sign = -1.0 if inner[0] == '-' else 1.0
+
+    try:
+        u_iv = tree_cost(u, domain)[2]
+        v_iv = tree_cost(rest, domain)[2]
+    except Exception:
+        return []
+    umin = min(abs(u_iv[0]), abs(u_iv[1]))
+    if umin == 0.0 or u_iv[0] * u_iv[1] < 0:       # u меняет знак — |u| не выразить
+        return []
+    vmax = iv_abs_max(v_iv)
+    t_max = vmax / (umin * umin)
+    if not math.isfinite(t_max) or t_max > 0.25:   # ряд имеет смысл только при малом t
+        return []
+
+    coeffs_fn, deriv_fn = _sqrt1p_family()
+    t_tree = ('/', rest, ('*', u, u))
+    if sign < 0:
+        t_tree = ('neg', t_tree)
+    t_iv = (-t_max, t_max)
+
+    out = []
+    for n in orders:
+        cs = _strip_zero_tail(coeffs_fn(n))
+        dmax = deriv_fn(t_iv, n)
+        if not math.isfinite(dmax):
+            continue
+        remainder = dmax * t_max ** (n + 1) / math.factorial(n + 1) * iv_abs_max(u_iv)
+        for build in (_horner, _horner_fma):
+            poly = build(cs, t_tree)
+            out.append(('approx', ('*', u, poly), remainder))
+    return out
+
+
+def _split_sqrt_minus(node):
+    """Разбирает узел вида sqrt(u*u ± v) − u (в любом порядке записи).
+
+    Возвращает (u, v, sign) или None. sign = −1 для sqrt(u²−v), +1 для sqrt(u²+v).
+    """
+    if node[0] not in ('-', '+'):
+        return None
+    a, b = node[1], node[2]
+    # приводим к виду «корень и вычитаемое u»
+    if node[0] == '-':
+        root, sub = a, b
+    elif b[0] == 'neg':
+        root, sub = a, b[1]
+    elif a[0] == 'neg':
+        root, sub = b, a[1]
+    else:
+        return None
+    if root[0] != 'sqrt':
+        return None
+    inner = root[1]
+    if inner[0] not in ('-', '+'):
+        return None
+    sq, rest = inner[1], inner[2]
+    if not (sq[0] == '*' and sq[1] == sq[2] and sq[1] == sub):
+        return None
+    return sub, rest, (-1.0 if inner[0] == '-' else 1.0)
+
+
+def _sqrt_minus_candidates(node, domain, orders):
+    """sqrt(u*u − v) − u при малом v/u² — главный кейс катастрофического сокращения.
+
+    Подставить ряд вместо корня мало: разность двух почти равных величин остаётся на
+    месте, и все значащие цифры по-прежнему гибнут. Поэтому сокращение делается сразу
+    на уровне паттерна:
+
+        sqrt(u² − v) − u = u·(sqrt(1−t) − 1) = −(v/u)·(1/2 + t/8 + t²/16 + …),  t = v/u²
+
+    Вычитания больше нет — есть произведение малой величины на ряд, и ошибка падает
+    с сорока семи бит до долей бита. Остаток Лагранжа умножается на |u| и уезжает в
+    узел approx, откуда его протащит обычный анализ.
+    """
+    parsed = _split_sqrt_minus(node)
+    if parsed is None:
+        return []
+    u, v, sign = parsed
+
+    try:
+        u_iv = tree_cost(u, domain)[2]
+        v_iv = tree_cost(v, domain)[2]
+    except Exception:
+        return []
+    umin = min(abs(u_iv[0]), abs(u_iv[1]))
+    if umin == 0.0 or u_iv[0] * u_iv[1] < 0:
+        return []
+    t_max = iv_abs_max(v_iv) / (umin * umin)
+    if not math.isfinite(t_max) or t_max > 0.25:
+        return []
+
+    coeffs_fn, deriv_fn = _sqrt1p_family()
+    t_tree = ('/', v, ('*', u, u))
+    if sign < 0:
+        t_tree = ('neg', t_tree)
+    t_iv = (-t_max, t_max)
+
+    out = []
+    for n in orders:
+        cs = coeffs_fn(n)
+        # (sqrt(1+t) − 1)/t = c1 + c2·t + c3·t² + …  — ряд без свободного члена
+        tail = _strip_zero_tail(cs[1:])
+        if not tail:
+            continue
+        dmax = deriv_fn(t_iv, n)
+        if not math.isfinite(dmax):
+            continue
+        remainder = dmax * t_max ** (n + 1) / math.factorial(n + 1) * iv_abs_max(u_iv)
+        # u·t сокращается до ±v/u сразу здесь: оставлять его в виде u·(v/u²) значит
+        # тащить в код лишнее умножение и лишнее деление, за которые никто не платит
+        head = ('/', v, u)
+        if sign < 0:
+            head = ('neg', head)
+        for build in (_horner, _horner_fma):
+            poly = build(tail, t_tree)
+            out.append(('approx', ('*', head, poly), remainder))
+    return out
+
+
+def rewrite_candidates(tree, domain, orders=range(2, 7)):
+    """Разложения ПОДвыражений: обходим дерево и подменяем по одному узлу за раз."""
+    out = []
+
+    def walk(node, rebuild):
+        for cand in _sqrt_shift_candidates(node, domain, orders):
+            out.append(rebuild(cand))
+        for cand in _sqrt_minus_candidates(node, domain, orders):
+            out.append(rebuild(cand))
+        if node[0] in ('num', 'var', 'approx'):
+            return
+        for i in range(1, len(node)):
+            def rb(new, node=node, i=i, rebuild=rebuild):
+                kids = list(node)
+                kids[i] = new
+                return rebuild(tuple(kids))
+            walk(node[i], rb)
+
+    walk(tree, lambda x: x)
+
+    # Подстановка ряда сама по себе катастрофу не лечит: в формуле корней остаётся
+    # b*(1 - t/2 - …) - b, то есть то же вычитание близких величин. Лечит алгебра
+    # ПОСЛЕ подстановки, поэтому каждый кандидат прогоняется через свой e-граф, где
+    # approx — непрозрачный лист. Там b сокращается, и остаётся -b*t/2*(1 + t/4).
+    from pareto.egraph import EGraph
+    from pareto.rules import RULES
+
+    scored = []
+    seen = set()
+    for t in out:
+        variants = [t]
+        try:
+            eg = EGraph()
+            root = eg.add_expr(t)
+            eg.saturate(RULES, iters=4, node_limit=20000)
+            sub, _ = _extract_simple(eg, root, domain)
+            variants.extend(sub)
+        except Exception:
+            pass
+        for v in variants:
+            key = repr(v)
+            if key in seen:
+                continue
+            seen.add(key)
+            try:
+                cost, err, _, work, lat = tree_cost(v, domain)
+            except (ValueError, ZeroDivisionError, OverflowError, KeyError):
+                continue
+            if math.isfinite(err):
+                scored.append((cost, err, v, work, lat))
+    return scored
+
+
+def _extract_simple(eg, root, domain, keep=6):
+    """Фронт для локального e-графа, без повторного захода в генерацию кандидатов.
+
+    Отдельная функция нужна, чтобы не уйти в рекурсию: pareto_extract сам зовёт
+    разложение рядами, и вызов его отсюда закрутил бы бесконечный цикл.
+    """
+    from pareto.analysis import pareto_extract
+    front, iv = pareto_extract(eg, root, domain, keep=keep, series=False)
+    return [p[2] for p in front], iv
+
+
 def series_candidates(tree, domain, orders=range(2, MAX_ORDER + 1)):
     """Приближения ряда для узлов вида f(g) на вершине дерева.
 
