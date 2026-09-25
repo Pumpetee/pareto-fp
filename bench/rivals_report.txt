@@ -1,0 +1,50 @@
+FPTaylor и Daisy против нас на наборе FPBench (rosa). Все числа — доказанные
+верхние границы абсолютной ошибки для double, одна и та же исходная запись и
+один и тот же домен. Наша форма — лучшая с фронта Парето из тех, что все три
+инструмента читают одинаково (без fma, approx, expm1/log1p/hypot).
+
+Таблица 1. Анализ против анализа: граница для ИСХОДНОЙ записи.
+case                  ours    FPTaylor       Daisy   кто тоньше
+verhulst         4.265e-16   2.275e-16         n/a   FPTaylor
+predatorPrey     1.745e-16   1.530e-16         n/a   FPTaylor
+sine             1.020e-15   3.864e-16         n/a   FPTaylor
+sqroot           7.806e-16   4.875e-16         n/a   FPTaylor
+rigidBody1       3.547e-13   2.949e-13         n/a   FPTaylor
+rigidBody2       3.980e-11   3.544e-11         n/a   FPTaylor
+turbine1         2.262e-13   1.639e-14         n/a   FPTaylor
+turbine2         2.711e-13   1.928e-14         n/a   FPTaylor
+turbine3         1.583e-13   9.111e-15         n/a   FPTaylor
+
+Таблица 2. Что получает пользователь: наша граница для НАШЕЙ формы против их
+границ для исходной записи (им переписывать нечем).
+case            ours(rewr)    FPTaylor       Daisy   vs FPT  vs Daisy
+verhulst         3.954e-16   2.275e-16         n/a    0.58x      n/a
+predatorPrey     1.670e-16   1.530e-16         n/a    0.92x      n/a
+sine             5.725e-16   3.864e-16         n/a    0.67x      n/a
+sqroot           3.580e-16   4.875e-16         n/a    1.36x      n/a
+rigidBody1       2.348e-13   2.949e-13         n/a    1.26x      n/a
+rigidBody2       2.634e-11   3.544e-11         n/a    1.35x      n/a
+turbine1         8.077e-14   1.639e-14         n/a    0.20x      n/a
+turbine2         1.003e-13   1.928e-14         n/a    0.19x      n/a
+turbine3         5.263e-14   9.111e-15         n/a    0.17x      n/a
+
+Таблица 3. Переписывание отдельно от нашего анализа: их же границы, посчитанные
+для нашей формы. Падение числа — заслуга переписывания, а не нашей модели ошибки.
+case           FPTaylor was FPTaylor now    Daisy was    Daisy now
+verhulst          2.275e-16    2.275e-16          n/a          n/a
+predatorPrey      1.530e-16    1.596e-16          n/a          n/a
+sine              3.864e-16    3.059e-16          n/a          n/a
+sqroot            4.875e-16    1.815e-16          n/a          n/a
+rigidBody1        2.949e-13    1.972e-13          n/a          n/a
+rigidBody2        3.544e-11    2.820e-11          n/a          n/a
+turbine1          1.639e-14    1.558e-14          n/a          n/a
+turbine2          1.928e-14    2.033e-14          n/a          n/a
+turbine3          9.111e-15    8.114e-15          n/a          n/a
+
+Санитарная проверка: наша граница ниже измеренной ошибки на той же форме — нигде
+
+наша форма даёт границу ниже, чем FPTaylor на исходной записи: 3 из 9
+то же против Daisy: 0 из 9
+наша форма улучшает границу САМОГО FPTaylor: 6 из 9
+наша форма улучшает границу САМОЙ Daisy: 0 из 9
+суммарное время поиска: 769.9 c

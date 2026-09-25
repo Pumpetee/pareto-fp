@@ -20,3 +20,7 @@ venv/
 .idea/
 .DS_Store
 Thumbs.db
+
+# third-party build fetched by tools/README.md, not ours to redistribute
+tools/fptaylor_js/fptaylor.js
+tools/fptaylor_js/default_config.txt

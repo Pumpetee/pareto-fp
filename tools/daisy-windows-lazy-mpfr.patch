@@ -1,0 +1,144 @@
+diff --git a/project/build.properties b/project/build.properties
+index 04267b1..c02c575 100755
+--- a/project/build.properties
++++ b/project/build.properties
+@@ -1 +1 @@
+-sbt.version=1.9.9
++sbt.version=1.11.3
+diff --git a/src/main/scala/daisy/analysis/FPTaylorPhase.scala b/src/main/scala/daisy/analysis/FPTaylorPhase.scala
+index aa2eeec..08ee15e 100644
+--- a/src/main/scala/daisy/analysis/FPTaylorPhase.scala
++++ b/src/main/scala/daisy/analysis/FPTaylorPhase.scala
+@@ -35,13 +35,13 @@ object FPTaylorPhase extends DaisyPhase with IntervalBranchAndBound {
+     )
+   )
+ 
+-  val minWidth = MPFRFloat.fromDouble(0.1) // for Branch and Bound
+-  val maxSplits: Int = 10000 // for Branch and Bound
++  lazy val minWidth = MPFRFloat.fromDouble(0.1) // for Branch and Bound
++  lazy val maxSplits: Int = 10000 // for Branch and Bound
+   //val deltaIntervalFloat64 = Interval.+/-(Float64.denormalsError) is in DeltaAbstractionUtils
+-  val epsilonIntervalFloat64MPFR = MPFRInterval.+/-(Float64.machineEpsilon)
+-  val deltaIntervalFloat64MPFR = MPFRInterval.+/-(Float64.denormalsError)
++  lazy val epsilonIntervalFloat64MPFR = MPFRInterval.+/-(Float64.machineEpsilon)
++  lazy val deltaIntervalFloat64MPFR = MPFRInterval.+/-(Float64.denormalsError)
+   // Float64.machineEpsilon * Rational(2,1) = 2.220446049250313e-16
+-  val transEpsInterval = MPFRInterval(MPFRFloat.fromDouble(-2.220446049250313e-16),
++  lazy val transEpsInterval = MPFRInterval(MPFRFloat.fromDouble(-2.220446049250313e-16),
+     MPFRFloat.fromDouble(2.2204460492503131e-16))
+ 
+   override def runPhase(ctx: Context, prog: Trees.Program): (Context, Trees.Program) = {
+diff --git a/src/main/scala/daisy/analysis/FPTaylorPhaseOriginal.scala b/src/main/scala/daisy/analysis/FPTaylorPhaseOriginal.scala
+index e1f66af..d5e78c5 100644
+--- a/src/main/scala/daisy/analysis/FPTaylorPhaseOriginal.scala
++++ b/src/main/scala/daisy/analysis/FPTaylorPhaseOriginal.scala
+@@ -33,13 +33,13 @@ object FPTaylorPhaseOriginal extends DaisyPhase with DeltaAbstractionUtils with
+       "using gelpia for range evaluation")
+   )
+ 
+-  val minWidth = MPFRFloat.fromDouble(0.1) // for Branch and Bound
++  lazy val minWidth = MPFRFloat.fromDouble(0.1) // for Branch and Bound
+   val maxSplits: Int = 10000 // for Branch and Bound
+   //val deltaIntervalFloat64 = Interval.+/-(Float64.denormalsError) is in DeltaAbstractionUtils
+-  val epsilonIntervalFloat64MPFR = MPFRInterval.+/-(Float64.machineEpsilon)
+-  val deltaIntervalFloat64MPFR = MPFRInterval.+/-(Float64.denormalsError)
++  lazy val epsilonIntervalFloat64MPFR = MPFRInterval.+/-(Float64.machineEpsilon)
++  lazy val deltaIntervalFloat64MPFR = MPFRInterval.+/-(Float64.denormalsError)
+   // Float64.machineEpsilon * Rational(2,1) = 2.220446049250313e-16
+-  val transEpsInterval = MPFRInterval(MPFRFloat.fromDouble(-2.220446049250313e-16),
++  lazy val transEpsInterval = MPFRInterval(MPFRFloat.fromDouble(-2.220446049250313e-16),
+     MPFRFloat.fromDouble(2.2204460492503131e-16))
+ 
+ 
+diff --git a/src/main/scala/daisy/analysis/ModularRoundOffErrorEvalPhase.scala b/src/main/scala/daisy/analysis/ModularRoundOffErrorEvalPhase.scala
+index e3f6e43..c9627a8 100644
+--- a/src/main/scala/daisy/analysis/ModularRoundOffErrorEvalPhase.scala
++++ b/src/main/scala/daisy/analysis/ModularRoundOffErrorEvalPhase.scala
+@@ -37,13 +37,13 @@ object ModularRoundOffErrorEvalPhase extends DaisyPhase with DeltaAbstractionUti
+       "validates the ranges of the arguments of the called function")
+   )
+ 
+-  val minWidth = MPFRFloat.fromDouble(0.1) // for Branch and Bound
++  lazy val minWidth = MPFRFloat.fromDouble(0.1) // for Branch and Bound
+   val maxSplits: Int = 10000 // for Branch and Bound
+-  val epsilonIntervalFloat64MPFR = MPFRInterval.+/-(Float64.machineEpsilon)
+-  val deltaIntervalFloat64MPFR = MPFRInterval.+/-(Float64.denormalsError)
++  lazy val epsilonIntervalFloat64MPFR = MPFRInterval.+/-(Float64.machineEpsilon)
++  lazy val deltaIntervalFloat64MPFR = MPFRInterval.+/-(Float64.denormalsError)
+ 
+   // Float64.machineEpsilon * Rational(2,1) = 2.220446049250313e-16
+-  val transEpsInterval = MPFRInterval(MPFRFloat.fromDouble(-2.220446049250313e-16),
++  lazy val transEpsInterval = MPFRInterval(MPFRFloat.fromDouble(-2.220446049250313e-16),
+     MPFRFloat.fromDouble(2.2204460492503131e-16))
+ 
+ 
+diff --git a/src/main/scala/daisy/analysis/TaylorAbstractPhase.scala b/src/main/scala/daisy/analysis/TaylorAbstractPhase.scala
+index 9f16588..735385a 100644
+--- a/src/main/scala/daisy/analysis/TaylorAbstractPhase.scala
++++ b/src/main/scala/daisy/analysis/TaylorAbstractPhase.scala
+@@ -23,11 +23,11 @@ object TaylorAbstractPhase extends DaisyPhase with DeltaAbstractionUtils with da
+   override implicit val debugSection = DebugSectionAnalysis
+   override val name = "TaylorAbstract"
+   override val description = "Computes the Taylor abstract"
+-  val epsilonIntervalFloat64MPFR = MPFRInterval.+/-(Float64.machineEpsilon)
+-  val deltaIntervalFloat64MPFR = MPFRInterval.+/-(Float64.denormalsError)
++  lazy val epsilonIntervalFloat64MPFR = MPFRInterval.+/-(Float64.machineEpsilon)
++  lazy val deltaIntervalFloat64MPFR = MPFRInterval.+/-(Float64.denormalsError)
+ 
+   // Float64.machineEpsilon * Rational(2,1) = 2.220446049250313e-16
+-  val transEpsInterval = MPFRInterval(MPFRFloat.fromDouble(-2.220446049250313e-16),
++  lazy val transEpsInterval = MPFRInterval(MPFRFloat.fromDouble(-2.220446049250313e-16),
+     MPFRFloat.fromDouble(2.2204460492503131e-16))
+ 
+   override def runPhase(ctx: Context, prog: Trees.Program): (Context, Trees.Program) = {
+diff --git a/src/main/scala/daisy/tools/MPFRAffineForm.scala b/src/main/scala/daisy/tools/MPFRAffineForm.scala
+index cfd072c..8d62664 100644
+--- a/src/main/scala/daisy/tools/MPFRAffineForm.scala
++++ b/src/main/scala/daisy/tools/MPFRAffineForm.scala
+@@ -68,7 +68,7 @@ object MPFRAffineForm {
+       Seq(MPFRDeviation(MPFRInterval(x), MPFRAffineIndex.nextGlobal)))
+   }
+ 
+-  val zero: MPFRAffineForm = MPFRAffineForm(MPFRInterval.zero, Seq())
++  lazy val zero: MPFRAffineForm = MPFRAffineForm(MPFRInterval.zero, Seq())
+ 
+   def newFormWithPacking(x0: MPFRInterval, noise: Seq[MPFRDeviation]): MPFRAffineForm = {
+     if ((noise.size) > 200) {
+diff --git a/src/main/scala/daisy/tools/MPFRFloat.scala b/src/main/scala/daisy/tools/MPFRFloat.scala
+index c8a3a59..dc37050 100644
+--- a/src/main/scala/daisy/tools/MPFRFloat.scala
++++ b/src/main/scala/daisy/tools/MPFRFloat.scala
+@@ -22,12 +22,12 @@ object MPFRFloat {
+   def fromDouble(d: Double): MPFRFloat = new MPFRFloat(new BigFloat(d, context))
+   def fromRational(r: Rational): MPFRFloat = new MPFRFloat(new BigFloat(r.toLongString, context))
+ 
+-  val Pi: MPFRFloat = new MPFRFloat(BigFloat.pi(context))
+-  val E: MPFRFloat = new MPFRFloat(BigFloat.e(context))
++  lazy val Pi: MPFRFloat = new MPFRFloat(BigFloat.pi(context))
++  lazy val E: MPFRFloat = new MPFRFloat(BigFloat.e(context))
+ 
+-  val zero: MPFRFloat = MPFRFloat.fromDouble(0.0)
+-  val one: MPFRFloat = MPFRFloat.fromDouble(1.0)
+-  val two: MPFRFloat = MPFRFloat.fromDouble(2.0)
++  lazy val zero: MPFRFloat = MPFRFloat.fromDouble(0.0)
++  lazy val one: MPFRFloat = MPFRFloat.fromDouble(1.0)
++  lazy val two: MPFRFloat = MPFRFloat.fromDouble(2.0)
+ 
+   def sqrt(x: MPFRFloat): MPFRFloat = new MPFRFloat(x.bf.sqrt(context))
+   def sqrtDown(x: MPFRFloat): MPFRFloat = new MPFRFloat(x.bf.sqrt(roundDownContext))
+diff --git a/src/main/scala/daisy/tools/MPFRInterval.scala b/src/main/scala/daisy/tools/MPFRInterval.scala
+index d188e96..9a955f6 100644
+--- a/src/main/scala/daisy/tools/MPFRInterval.scala
++++ b/src/main/scala/daisy/tools/MPFRInterval.scala
+@@ -29,9 +29,9 @@ object MPFRInterval {
+ 
+   def +/-(r: Rational) = MPFRInterval(Interval(-r,r))
+ 
+-  val zero: MPFRInterval = MPFRInterval(fzero)
++  lazy val zero: MPFRInterval = MPFRInterval(fzero)
+ 
+-  val pi = MPFRInterval(MPFRFloat.fromString("3.141592653589793238"),
++  lazy val pi = MPFRInterval(MPFRFloat.fromString("3.141592653589793238"),
+                     MPFRFloat.fromString("3.141592653589793239"))
+ 
+   def union(ints: Set[MPFRInterval]): MPFRInterval = MPFRInterval(ints.minBy(_.xlo).xlo, ints.maxBy(_.xhi).xhi) //.tail.foldLeft(ints.head)({case (acc, x) => acc.union(x)})
