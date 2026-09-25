@@ -36,6 +36,8 @@ SEED = 20260924
 def eval_float(tree, env):
     """Считает дерево в обычном double — ровно так, как это сделает машина."""
     op = tree[0]
+    if op in ('approx', 'eft'):     # служебные обёртки: считаем внутреннее дерево
+        return eval_float(tree[1], env)
     if op == 'num':
         return float(tree[1])
     if op == 'var':

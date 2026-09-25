@@ -181,9 +181,70 @@ def _log_of_quotient_candidate(node):
     return [('+', ('log', q), ('log1p', delta))]
 
 
+def _as_horner(node, var=None):
+    """Разбирает схему Горнера в список коэффициентов [c0, c1, …] и переменную.
+
+    Принимает обе записи, которые рождает наш поиск: `(inner*x) + c` и `fma(inner, x, c)`.
+    Возвращает None, если дерево не полином одной переменной.
+    """
+    coeffs = []
+    cur = node
+    while True:
+        if cur[0] == 'fma':
+            inner, x, c = cur[1], cur[2], cur[3]
+        elif cur[0] == '+' and cur[1][0] == '*':
+            inner, x, c = cur[1][1], cur[1][2], cur[2]
+        elif cur[0] == '+' and cur[2][0] == '*':
+            inner, x, c = cur[2][1], cur[2][2], cur[1]
+        else:
+            break
+        if x[0] != 'var':
+            if inner[0] == 'var':
+                inner, x = x, inner
+            else:
+                break
+        if var is None:
+            var = x
+        elif x != var:
+            break
+        if c[0] != 'num':
+            break
+        coeffs.append(c)
+        cur = inner
+    if cur[0] != 'num' or len(coeffs) < 2 or var is None:
+        return None
+    coeffs.append(cur)
+    return coeffs, var          # coeffs идут от младшего к старшему
+
+
+def _comp_horner_candidate(node):
+    """Компенсированная схема Горнера (Graillat, Langlois, Louvet).
+
+    Обычный Горнер округляет дважды на каждом шаге — на умножении и на сложении.
+    Здесь обе ошибки извлекаются точно, TwoProduct и TwoSum, копятся в отдельной
+    переменной и возвращаются в результат одним сложением в конце. Точность выходит
+    как у вычисления в двойной длине, а операций втрое больше — ровно тот размен,
+    ради которого существует фронт.
+    """
+    parsed = _as_horner(node)
+    if parsed is None:
+        return []
+    coeffs, x = parsed
+
+    s = coeffs[-1]              # старший коэффициент
+    corr = _n(0.0)
+    for c in reversed(coeffs[:-1]):
+        p, pe = two_prod(s, x)
+        s2, se = two_sum(p, c)
+        corr = ('+', ('fma', corr, x, pe), se)
+        s = s2
+    return [('+', s, corr)]
+
+
 BUILDERS = (_div_sum_candidate, _diff_of_products_candidate, _exp_product_candidate,
             _prod_with_sum_candidate, _div_chain_candidate,
-            _div_by_sum_candidate, _log_of_quotient_candidate)
+            _div_by_sum_candidate, _log_of_quotient_candidate,
+            _comp_horner_candidate)
 
 
 def eft_candidates(tree, domain):
