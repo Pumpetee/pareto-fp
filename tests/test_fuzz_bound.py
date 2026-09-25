@@ -26,7 +26,7 @@ from pareto.analysis import pareto_extract, refine_front, tree_cost, tree_cost_r
 from pareto.codegen import to_text
 from pareto.egraph import EGraph
 from pareto.rules import RULES
-from pareto.run import exact
+from pareto.run import exact_stable
 from pareto.run_herbie_metric import eval_float
 
 getcontext().prec = 60
@@ -81,7 +81,9 @@ def measure(tree, expr, domain, rng):
     for env in pts:
         try:
             got = eval_float(tree, env)
-            ref = exact(expr, {k: Decimal(v) for k, v in env.items()})
+            ref = exact_stable(expr, {k: Decimal(v) for k, v in env.items()})
+            if ref is None:
+                continue        # эталон сам себе не доверяет — такую точку не судим
         except (ValueError, ZeroDivisionError, OverflowError, KeyError):
             continue
         if not math.isfinite(got):
