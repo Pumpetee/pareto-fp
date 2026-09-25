@@ -164,6 +164,78 @@ def eval_interval(op, kids):
     raise ValueError(op)
 
 
+def _is_pow2(x):
+    """Точная степень двойки (со знаком). Умножение на неё не округляет вовсе."""
+    if x == 0.0 or not math.isfinite(x):
+        return False
+    m, _ = math.frexp(abs(x))
+    return m == 0.5
+
+
+def _normal_range(iv):
+    """Результат далеко от денормалей и от переполнения — там точность гарантирована."""
+    lo, hi = abs(iv[0]), abs(iv[1])
+    top = max(lo, hi)
+    return math.isfinite(top) and top < 1e290 and (top == 0.0 or top > 1e-290)
+
+
+def exact_op(tree, kid_ivs, kid_errs, out_iv):
+    """Округляет ли операция вообще. Две классические ситуации, когда нет.
+
+    Обе давно известны и обе используются серьёзными анализаторами; мы платили за
+    них полной ценой округления и ровно поэтому проигрывали FPTaylor там, где
+    ветвление уже ничего не давало — на многочленах с двоичными коэффициентами.
+
+    1. Умножение и деление на точную степень двойки только двигают экспоненту.
+       Мантисса не меняется, округления нет (пока не задели денормали и переполнение).
+       В наборе FPBench таких коэффициентов полно: 0.5, 0.125, 0.0625, 2, 4.
+    2. Лемма Штербенца: если b/2 <= a <= 2b и оба одного знака, то a − b
+       представимо точно. Это сердце всех компенсированных схем, и в разложениях
+       функций такие вычитания встречаются постоянно.
+
+    Проверка идёт по интервалам, причём с запасом на СОБСТВЕННУЮ ошибку аргументов:
+    условие должно выполняться не для идеальных значений, а для тех чисел, которые
+    реально окажутся в регистрах.
+    """
+    op = tree[0]
+    if not _normal_range(out_iv):
+        return False
+
+    if op in ('*', '/'):
+        for pos, kid in enumerate(tree[1:]):
+            if kid[0] == 'num' and _is_pow2(float(kid[1])):
+                # для деления точна только правая позиция: 2/x округляет
+                if op == '/' and pos == 0:
+                    continue
+                other = kid_ivs[1 - pos]
+                if _normal_range(other):
+                    return True
+        return False
+
+    if op == '+':
+        for pos, kid in enumerate(tree[1:]):
+            if kid[0] == 'num' and float(kid[1]) == 0.0:
+                return True
+        return False
+
+    if op == '-':
+        (a0, a1), (b0, b1) = kid_ivs
+        ea, eb = kid_errs[0], kid_errs[1]
+        if not (math.isfinite(ea) and math.isfinite(eb)):
+            return False
+        # Раздвигаем интервалы на собственную ошибку: в регистрах лежат не идеальные
+        # значения, а вычисленные, и лемма должна держаться именно для них.
+        a0, a1 = a0 - ea, a1 + ea
+        b0, b1 = b0 - eb, b1 + eb
+        if b0 > 0.0 and a0 > 0.0:
+            return a0 >= b1 / 2.0 and a1 <= 2.0 * b0
+        if b1 < 0.0 and a1 < 0.0:
+            return a1 <= b0 / 2.0 and a0 >= 2.0 * b1
+        return False
+
+    return False
+
+
 def propagate_error(op, kid_ivs, kid_errs, out_iv, round_scale=1.0):
     """Верхняя граница АБСОЛЮТНОЙ ошибки результата.
 
@@ -380,7 +452,9 @@ def tree_cost(tree, domain):
     ivs = [k[2] for k in kids]
     out_iv = eval_interval(op, ivs)
     out_iv = tighten(tree, domain, out_iv)
-    err = propagate_error(op, ivs, [k[1] for k in kids], out_iv)
+    errs = [k[1] for k in kids]
+    scale = 0.0 if exact_op(tree, ivs, errs, out_iv) else 1.0
+    err = propagate_error(op, ivs, errs, out_iv, round_scale=scale)
     work = COST[op] + sum(k[3] for k in kids)
     lat = COST[op] + max(k[4] for k in kids)
     return work + lat, err, out_iv, work, lat
@@ -434,6 +508,26 @@ def _halve(domain, var):
     return a, b
 
 
+def combined_bound(tree, domain):
+    """Лучшая из двух честных оценок на одном домене.
+
+    Интервальная и символическая считают одно и то же разными путями: первая
+    копит худшие случаи по узлам, вторая держит округления именованными символами
+    и сокращает те, что физически одно и то же событие. Обе верны сверху, поэтому
+    минимум тоже верен. На выражениях с повторяющимися подвыражениями символическая
+    бьёт интервальную в сотни раз, на остальных — наоборот.
+    """
+    e = tree_cost(tree, domain)[1]
+    try:
+        from pareto.symbolic_cost import symbolic_bound
+        sb = symbolic_bound(tree, domain)
+        if sb is not None and sb < e:
+            e = sb
+    except (RecursionError, ValueError, ZeroDivisionError, OverflowError, KeyError):
+        pass
+    return e
+
+
 def tree_cost_refined(tree, domain, boxes=None):
     """То же, что tree_cost, но граница уточнена ветвлением по домену.
 
@@ -441,11 +535,12 @@ def tree_cost_refined(tree, domain, boxes=None):
     прогона. Возвращаемый интервал — оболочка по частям.
     """
     base = tree_cost(tree, domain)
+    base_err = combined_bound(tree, domain)
     n_boxes = SPLIT_BOXES if boxes is None else boxes
-    if n_boxes <= 1 or not domain or not math.isfinite(base[1]) or base[1] == 0.0:
-        return base
+    if n_boxes <= 1 or not domain or not math.isfinite(base_err) or base_err == 0.0:
+        return base[0], base_err, base[2], base[3], base[4]
 
-    work = [(base[1], domain, base[2])]
+    work = [(base_err, domain, base[2])]
     made = 1
     while made < n_boxes:
         i = max(range(len(work)), key=lambda k: work[k][0])
@@ -461,10 +556,12 @@ def tree_cost_refined(tree, domain, boxes=None):
         try:
             r1 = tree_cost(tree, halves[0])
             r2 = tree_cost(tree, halves[1])
+            e1 = combined_bound(tree, halves[0])
+            e2 = combined_bound(tree, halves[1])
         except (ValueError, ZeroDivisionError, OverflowError, KeyError):
             break
-        work[i] = (r1[1], halves[0], r1[2])
-        work.append((r2[1], halves[1], r2[2]))
+        work[i] = (e1, halves[0], r1[2])
+        work.append((e2, halves[1], r2[2]))
         made += 1
 
     err = max(w[0] for w in work)
@@ -472,7 +569,7 @@ def tree_cost_refined(tree, domain, boxes=None):
     hi = max(w[2][1] for w in work)
     # Подстраховка: если из-за tighten или модели рядов где-то нарушилась
     # монотонность, берём лучшее из двух — обе оценки сами по себе состоятельны.
-    return base[0], min(err, base[1]), (lo, hi), base[3], base[4]
+    return base[0], min(err, base_err), (lo, hi), base[3], base[4]
 
 
 def refine_front(front, domain, boxes=None):
@@ -492,7 +589,7 @@ def refine_front(front, domain, boxes=None):
             # без остатка, то есть враньё в тысячи раз: на exp(-0.723) вышло
             # 1.078e-16 против реальных 5.307e-02. Поэтому уточняем только те точки,
             # где пересчёт воспроизводит исходную границу, — значит дерево то самое.
-            plain = tree_cost(tree, domain)[1]
+            plain = combined_bound(tree, domain)
             same = (math.isfinite(plain) and math.isfinite(err)
                     and abs(plain - err) <= 1e-12 * max(abs(plain), abs(err), 1e-300))
             err2 = tree_cost_refined(tree, domain, boxes=boxes)[1] if same else err
