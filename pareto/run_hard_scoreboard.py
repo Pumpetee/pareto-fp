@@ -52,13 +52,26 @@ def main():
         h_tree = sexp_to_tree(node) if node is not None else None
 
         base_bits = bits_of_error(case['expr'], case, pts)[0]
-        # наша точка — самая точная в пределах разумной цены, то есть то, что инструмент отдаёт
-        ours = min(front, key=lambda p: (p[1], p[0]))
-        ours_bits = bits_of_error(ours[2], case, pts)[0]
+
+        # У него одна форма, у нас фронт — поэтому честно смотреть лучшее по каждой
+        # метрике отдельно, а не одну произвольно выбранную точку.
+        scored = []
+        for p in front:
+            try:
+                b = bits_of_error(p[2], case, pts)[0]
+            except Exception:
+                continue
+            scored.append((b, p))
+        if not scored:
+            continue
+        best_bits, best_bits_pt = min(scored, key=lambda s: s[0])
+        best_bound_pt = min(front, key=lambda p: (p[1], p[0]))
 
         row = {'name': name, 'base_bits': base_bits,
-               'ours_form': to_text(ours[2]), 'ours_bound': ours[1], 'ours_cost': ours[0],
-               'ours_bits': ours_bits}
+               'ours_form': to_text(best_bits_pt[2]),
+               'ours_bits': best_bits, 'ours_bits_cost': best_bits_pt[0],
+               'ours_bound': best_bound_pt[1], 'ours_cost': best_bound_pt[0],
+               'ours_bound_form': to_text(best_bound_pt[2])}
 
         if h_tree is None:
             row.update({'herbie_form': None})
@@ -69,9 +82,12 @@ def main():
             except Exception:
                 h_bits = float('nan')
             covered = [p for p in front if p[0] <= h_cost and p[1] <= h_bound]
+            # точка фронта дешевле его формы при не худшей доказанной границе
+            cheaper = [p for p in front if p[0] < h_cost and p[1] <= h_bound]
             row.update({'herbie_form': to_text(h_tree), 'herbie_bound': h_bound,
                         'herbie_cost': h_cost, 'herbie_bits': h_bits,
-                        'covered': bool(covered)})
+                        'covered': bool(covered),
+                        'cheaper_at_same_bound': min(cheaper)[0] if cheaper else None})
         rows.append(row)
 
     (BENCH / 'hard_scoreboard.json').write_text(
@@ -95,9 +111,11 @@ def main():
             loss += 1
         else:
             tie += 1
+        mark = '  <- our front has a cheaper point at no worse bound' \
+            if r.get('cheaper_at_same_bound') is not None else ''
         out.append(f'{r["name"]:<16}{r["base_bits"]:9.2f}{r["ours_bits"]:8.2f}{r["herbie_bits"]:8.2f}   '
                    f'{r["ours_bound"]:11.2e}{r["herbie_bound"]:12.2e}'
-                   f'{r["ours_cost"]:10.1f}{r["herbie_cost"]:10.1f}')
+                   f'{r["ours_cost"]:10.1f}{r["herbie_cost"]:10.1f}{mark}')
     out += ['', f'on accuracy (his metric): we win {win}, tie {tie}, lose {loss}, '
                 f'{nohit} case(s) his answer is outside our operation set.', '', 'forms:']
     for r in rows:

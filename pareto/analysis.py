@@ -311,6 +311,19 @@ def pareto_extract(eg, root, domain, keep=8, rounds=10):
             continue
         out.append((c2, e2, tree, w2, l2))
 
+    # Приближения рядом Тейлора добавляются кандидатами, а не сливаются с e-графом:
+    # e-граф хранит тождества, а ряд тождеством не является. Их граница уже включает
+    # остаточный член, поэтому сравнивать их с точными формами можно напрямую.
+    if out:
+        from pareto.taylor import series_candidates
+        # пробуем КАЖДУЮ форму фронта: разложение умеет раскрывать верхний узел, а
+        # нужная запись может лежать любой точкой — expm1(x) и (exp(x) + -1) это
+        # один класс, но разложить можно только первую
+        extra = []
+        for _, _, seed, _, _ in out:
+            extra.extend(series_candidates(seed, domain))
+        out.extend(extra)
+
     # после пересчёта часть точек может оказаться доминируемой — фронт пересобираем
     final = []
     for cost, err, tree, work, lat in sorted(out, key=lambda p: (p[0], p[1])):
