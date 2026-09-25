@@ -67,7 +67,7 @@ def _ordered(x):
 
 def eval_float(tree, env):
     op = tree[0]
-    if op == 'approx':
+    if op in ('approx', 'eft'):
         return eval_float(tree[1], env)
     if op == 'num':
         return float(tree[1])

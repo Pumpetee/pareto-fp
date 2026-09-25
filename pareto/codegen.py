@@ -7,7 +7,7 @@ JS_FUN = {'sqrt': 'Math.sqrt', 'exp': 'Math.exp', 'log': 'Math.log',
 
 def to_js(t):
     op = t[0]
-    if op == 'approx':      # обёртка приближения в коде не видна
+    if op in ('approx', 'eft'):   # служебные обёртки в коде не видны
         return to_js(t[1])
     if op == 'num':
         v = t[1]
@@ -31,7 +31,7 @@ C_FUN = {'sqrt': 'sqrt', 'exp': 'exp', 'log': 'log',
 
 def to_c(t):
     op = t[0]
-    if op == 'approx':      # обёртка приближения в коде не видна
+    if op in ('approx', 'eft'):   # служебные обёртки в коде не видны
         return to_c(t[1])
     if op == 'num':
         return repr(float(t[1]))
@@ -48,7 +48,7 @@ def to_c(t):
 
 def to_text(t):
     op = t[0]
-    if op == 'approx':      # обёртка приближения в коде не видна
+    if op in ('approx', 'eft'):   # служебные обёртки в коде не видны
         return to_text(t[1])
     if op == 'num':
         v = float(t[1])

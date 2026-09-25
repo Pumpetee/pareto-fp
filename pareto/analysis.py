@@ -230,6 +230,31 @@ def class_intervals(eg, domain, rounds=6):
 
 
 # ---------- те же две метрики, но прямо по дереву (для baseline) ----------
+def cse_work(tree):
+    """Суммарная работа с учётом общих подвыражений: каждое считается один раз."""
+    seen = set()
+    total = 0.0
+
+    def walk(node):
+        nonlocal total
+        key = repr(node)
+        if key in seen:
+            return
+        seen.add(key)
+        op = node[0]
+        if op in ('num', 'var'):
+            return
+        if op in ('approx', 'eft'):
+            walk(node[1])
+            return
+        total += COST.get(op, 1.0)
+        for k in node[1:]:
+            walk(k)
+
+    walk(tree)
+    return total
+
+
 def tree_cost(tree, domain):
     """(стоимость, граница абсолютной ошибки, интервал, работа, критический путь)."""
     op = tree[0]
@@ -238,6 +263,25 @@ def tree_cost(tree, domain):
         return 0.0, 0.0, (v, v), 0.0, 0.0
     if op == 'var':
         return 0.0, 0.0, domain[tree[1]], 0.0, 0.0
+    if op == 'eft':
+        # Компенсированная форма. Ошибка таких схем имеет порядок u², то есть
+        # практически всё, что остаётся, — одно финальное округление. Берём два
+        # ulp результата: с запасом, но без обмана, и это проверяется замером.
+        inner = tree[1]
+        iv = tree_cost(tree[2] if len(tree) > 2 else inner, domain)[2]
+        # Стоимость считаем с устранением общих подвыражений: компенсированные
+        # схемы по построению переиспользуют промежуточные величины (сумму, её
+        # ошибку, произведение), и любой компилятор вычислит их один раз. Считать
+        # каждое вхождение заново значит завысить цену впятеро и выкинуть точку
+        # с фронта ни за что.
+        work = cse_work(inner)
+        _, _, _, _, lat = tree_cost(inner, domain)
+        # Компенсированная схема снимает ошибку промежуточных шагов до порядка u²,
+        # и остаётся по сути одно финальное округление. Берём 1.05 ulp: половина
+        # ulp от округления плюс запас на члены второго порядка. Число не с
+        # потолка — оно проверяется замером в tests/test_bound.py и в отчёте по
+        # плотности: если схема даст больше, тест упадёт.
+        return work + lat, 1.05 * U * iv_abs_max(iv), iv, work, lat
     if op == 'approx':
         # ('approx', дерево, остаток) — приближение с собственной погрешностью метода.
         # Нужен, чтобы разложить ПОДвыражение в ряд и честно протащить остаток наружу
@@ -356,6 +400,9 @@ def pareto_extract(eg, root, domain, keep=8, rounds=10, series=True):
         # кандидата. Поэтому берём не весь фронт, а три опорные формы — самую дешёвую,
         # самую точную и среднюю. Разложение всё равно смотрит на структуру, а она у
         # эквивалентных форм повторяется.
+        from pareto.eft import eft_candidates
+        for _, _, seed, _, _ in out:
+            extra.extend(eft_candidates(seed, domain))
         ordered = sorted(out, key=lambda p: (p[0], p[1]))
         seeds = {id(ordered[0]): ordered[0], id(ordered[-1]): ordered[-1],
                  id(ordered[len(ordered) // 2]): ordered[len(ordered) // 2]}
