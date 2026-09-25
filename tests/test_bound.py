@@ -82,7 +82,7 @@ class BoundHolds(unittest.TestCase):
             case = CASES[name]
             eg = EGraph()
             root = eg.add_expr(case['expr'])
-            eg.saturate(RULES, iters=case.get('iters', 6), node_limit=20000)
+            eg.saturate(RULES, iters=case.get('iters', 6), node_limit=20000, domain=case['domain'])
             front, _ = pareto_extract(eg, root, case['domain'], keep=10)
             self.assertTrue(front, f'{name}: empty Pareto front')
 

@@ -86,7 +86,7 @@ def rows_for(name, tree, domain, rng, limit=4, with_original=False):
 
     eg = EGraph()
     root = eg.add_expr(tree)
-    eg.saturate(RULES, iters=6, node_limit=20000)
+    eg.saturate(RULES, iters=6, node_limit=20000, domain=domain)
     front, _ = pareto_extract(eg, root, domain, keep=limit)
     for point in front[:limit]:
         cost, bound, form = point[0], point[1], point[2]

@@ -45,7 +45,7 @@ def main():
 
         eg = EGraph()
         root = eg.add_expr(case['expr'])
-        eg.saturate(RULES, iters=case.get('iters', 10), node_limit=case.get('node_limit', 60000))
+        eg.saturate(RULES, iters=case.get('iters', 10), node_limit=case.get('node_limit', 60000), domain=case['domain'])
         front, _ = pareto_extract(eg, root, case['domain'], keep=10)
 
         node = herbie_body(text, name)

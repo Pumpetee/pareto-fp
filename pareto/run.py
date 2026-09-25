@@ -217,7 +217,7 @@ def run_case(name, case, n_points=1024, reps=400):
 
     eg = EGraph()
     root = eg.add_expr(expr)
-    eg.saturate(RULES, iters=case.get('iters', 10), node_limit=case.get('node_limit', 60000))
+    eg.saturate(RULES, iters=case.get('iters', 10), node_limit=case.get('node_limit', 60000), domain=domain)
     nodes, classes = eg.size()
 
     front, _ = pareto_extract(eg, root, domain, keep=10)

@@ -174,7 +174,7 @@ def run(names, prefix='herbie'):
 
         eg = EGraph()
         root = eg.add_expr(tree)
-        eg.saturate(RULES, iters=case.get('iters', 10))
+        eg.saturate(RULES, iters=case.get('iters', 10), domain=dom)
         front, _ = pareto_extract(eg, root, dom, keep=10)
         ours = min(front, key=lambda p: (p[1], p[0]))       # наша самая точная форма
 

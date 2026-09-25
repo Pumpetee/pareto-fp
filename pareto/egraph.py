@@ -58,6 +58,11 @@ class EGraph:
     hashcons: dict = field(default_factory=dict)      # node -> eclass
     classes: dict = field(default_factory=dict)       # eclass -> set(node)
     _dirty: list = field(default_factory=list)
+    # Домен нужен правилам с предусловием: сократить общий множитель в дроби
+    # можно только там, где он заведомо не обращается в ноль, а это видно
+    # исключительно по интервалу. Пусто — такие правила просто не срабатывают.
+    domain: dict = field(default_factory=dict)
+    ivs: dict = field(default_factory=dict)
 
     # ---------- построение ----------
     def canon(self, node):
@@ -226,10 +231,49 @@ class EGraph:
             self.rebuild()
         return merged
 
-    def saturate(self, rules, iters=8, node_limit=60000):
-        """rules: список (lhs, rhs, двусторонее?) или (lhs, функция)."""
+    def refresh_intervals(self, rounds=3):
+        """Пересчитать интервалы классов — опора для правил с предусловием.
+
+        Дорого: проход по всем классам несколько раз. На графе в шесть тысяч узлов
+        пересчёт каждый круг насыщения превращает секундный прогон в бесконечный,
+        поэтому зовётся редко — см. saturate.
+        """
+        if not self.domain:
+            self.ivs = {}
+            return self.ivs
+        from pareto.analysis import class_intervals
+        self.ivs = class_intervals(self, self.domain, rounds=rounds)
+        return self.ivs
+
+    def nonzero(self, eid):
+        """Точно ли класс не обращается в ноль на домене.
+
+        Осторожность здесь не формальность: правило сокращения без такой проверки
+        уже ломало корректность — на sqrt(x)−sqrt(x) деление 0/0 схлопывалось в
+        единицу, и фронт выдавал форму, не равную исходному выражению.
+        """
+        iv = self.ivs.get(self.uf.find(eid))
+        if iv is None:
+            return False
+        lo, hi = iv
+        return lo > 0.0 or hi < 0.0
+
+    def saturate(self, rules, iters=8, node_limit=60000, domain=None):
+        """rules: список (lhs, rhs, двусторонее?) или (lhs, функция).
+
+        domain включает правила с предусловием: без него они молчат, потому что
+        проверить ненулевость делителя нечем.
+        """
+        if domain:
+            self.domain = domain
         self.fold_constants()
-        for _ in range(iters):
+        self.refresh_intervals()
+        for _round in range(iters):
+            # интервалы освежаем не каждый круг: они нужны лишь условным правилам,
+            # а их проверка терпит небольшое отставание — лишь бы не была неверной,
+            # а устаревший интервал делает правило строже, а не слабее
+            if _round and _round % 3 == 0:
+                self.refresh_intervals()
             matches = []
             for rule in rules:
                 lhs, rhs = rule[0], rule[1]
@@ -241,8 +285,15 @@ class EGraph:
             before_nodes = len(self.hashcons)
             before_classes = len({self.uf.find(e) for e in self.classes})
             for eid, rhs, subst in matches:
+                # лимит проверяем здесь, а не только в конце круга: один круг на
+                # выражении с корнями легко добавляет больше ста тысяч узлов, и
+                # проверка постфактум опаздывает на минуты машинного времени
+                if len(self.hashcons) > node_limit:
+                    break
                 try:
-                    new_id = rhs(self, subst) if callable(rhs) else self.instantiate(rhs, subst)
+                    # callable получает и eid: правилу с предусловием часто нужен
+                    # контекст, а не только подстановка
+                    new_id = rhs(self, subst, eid) if callable(rhs) else self.instantiate(rhs, subst)
                 except KeyError:
                     continue
                 if new_id is None:
@@ -250,6 +301,7 @@ class EGraph:
                 self.merge(eid, new_id)
             self.rebuild()
             self.fold_constants()      # правила рождают новые константные узлы каждый круг
+            self.refresh_intervals()   # и новые классы, чьи интервалы нужны условным правилам
             # рост считаем по факту: появились узлы или схлопнулись классы
             after_classes = len({self.uf.find(e) for e in self.classes})
             grew = (len(self.hashcons) != before_nodes) or (after_classes != before_classes)

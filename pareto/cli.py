@@ -49,7 +49,7 @@ def analyse(text, dom, keep=10, iters=10, budget=2.0, cost_budget=1.5):
     tree = parse(text)
     eg = EGraph()
     root = eg.add_expr(tree)
-    eg.saturate(RULES, iters=iters)
+    eg.saturate(RULES, iters=iters, domain=dom)
     front, _ = pareto_extract(eg, root, dom, keep=keep)
     base_cost, base_err, _, _, _ = tree_cost(tree, dom)
 

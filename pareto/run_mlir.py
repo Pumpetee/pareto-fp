@@ -153,7 +153,7 @@ def run_case(name, case, n_points=1024, reps=400):
     expr, domain = case['expr'], case['domain']
     eg = EGraph()
     root = eg.add_expr(expr)
-    eg.saturate(RULES, iters=case.get('iters', 10))
+    eg.saturate(RULES, iters=case.get('iters', 10), domain=case['domain'])
     front, _ = pareto_extract(eg, root, domain, keep=10)
     _, b_err, _, _, _ = tree_cost(expr, domain)
     budget = case.get('budget', 2.0)

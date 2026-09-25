@@ -289,8 +289,25 @@ def _sqrt_minus_candidates(node, domain, orders):
     return out
 
 
+def _has_sqrt(node):
+    """Быстрая проверка: есть ли в дереве корень вообще.
+
+    Без неё разложение подвыражений запускалось на каждом выражении подряд, включая
+    те, где раскладывать нечего, и тянуло за собой локальную саторацию на каждого
+    кандидата. Прогон отчёта по плотности границ вырос с минуты до четверти часа —
+    ровно на этой пустой работе.
+    """
+    if node[0] == 'sqrt':
+        return True
+    if node[0] in ('num', 'var', 'approx'):
+        return False
+    return any(_has_sqrt(k) for k in node[1:])
+
+
 def rewrite_candidates(tree, domain, orders=range(2, 7)):
     """Разложения ПОДвыражений: обходим дерево и подменяем по одному узлу за раз."""
+    if not _has_sqrt(tree):
+        return []
     out = []
 
     def walk(node, rebuild):
@@ -314,7 +331,7 @@ def rewrite_candidates(tree, domain, orders=range(2, 7)):
     # ПОСЛЕ подстановки, поэтому каждый кандидат прогоняется через свой e-граф, где
     # approx — непрозрачный лист. Там b сокращается, и остаётся -b*t/2*(1 + t/4).
     from pareto.egraph import EGraph
-    from pareto.rules import RULES
+    from pareto.rules import CANCEL_RULES, RULES
 
     scored = []
     seen = set()
@@ -323,7 +340,9 @@ def rewrite_candidates(tree, domain, orders=range(2, 7)):
         try:
             eg = EGraph()
             root = eg.add_expr(t)
-            eg.saturate(RULES, iters=4, node_limit=20000)
+            # сокращение общего множителя нужно именно здесь: после подстановки
+            # ряда в числителе и знаменателе остаётся один и тот же множитель
+            eg.saturate(RULES + CANCEL_RULES, iters=4, node_limit=8000, domain=domain)
             sub, _ = _extract_simple(eg, root, domain)
             variants.extend(sub)
         except Exception:
