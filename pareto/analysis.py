@@ -295,6 +295,22 @@ def partial_cost(tree, domain, depth):
     return work + lat, err, out_iv, work, lat
 
 
+def tighten(tree, domain, iv):
+    """Сужает интервал узла аффинной оценкой, если та оказалась уже.
+
+    Интервальная арифметика не помнит, что два вхождения x — это один и тот же x,
+    и раздувает оценку тем сильнее, чем чаще повторяются переменные. Аффинная
+    форма это помнит: x − x у неё ровно ноль, а не ширина домена. Берём пересечение
+    двух оценок — хуже ни одна из них не делает, а уже почти всегда делает вторая.
+    Именно этим наши границы отставали от Daisy и FPTaylor.
+    """
+    try:
+        from pareto.affine import interval_of
+        return interval_of(tree, domain, iv)
+    except (ValueError, ZeroDivisionError, OverflowError, KeyError, RecursionError):
+        return iv
+
+
 def tree_cost(tree, domain):
     """(стоимость, граница абсолютной ошибки, интервал, работа, критический путь)."""
     op = tree[0]
@@ -335,6 +351,7 @@ def tree_cost(tree, domain):
     kids = [tree_cost(k, domain) for k in tree[1:]]
     ivs = [k[2] for k in kids]
     out_iv = eval_interval(op, ivs)
+    out_iv = tighten(tree, domain, out_iv)
     err = propagate_error(op, ivs, [k[1] for k in kids], out_iv)
     work = COST[op] + sum(k[3] for k in kids)
     lat = COST[op] + max(k[4] for k in kids)
@@ -425,6 +442,17 @@ def pareto_extract(eg, root, domain, keep=8, rounds=10, series=True):
         except (ValueError, ZeroDivisionError, OverflowError):
             out.append((cost, err, tree, work, lat))
             continue
+        # Символическая форма ошибки учитывает, что одинаковые подвыражения
+        # округляются одинаково, и на выражениях с повторами даёт куда более тугую
+        # оценку — на (x*x−1)/(x−1) в 478 раз. Берём лучшую из двух: обе верны
+        # сверху, поэтому минимум тоже верен.
+        try:
+            from pareto.symbolic_cost import symbolic_bound
+            sb = symbolic_bound(tree, domain)
+            if sb is not None and sb < e2:
+                e2 = sb
+        except (RecursionError, ValueError, ZeroDivisionError, OverflowError, KeyError):
+            pass
         out.append((c2, e2, tree, w2, l2))
 
     # Приближения рядом Тейлора добавляются кандидатами, а не сливаются с e-графом:
