@@ -33,6 +33,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from pareto.codegen import to_text
 from pareto.parser import parse
 from pareto.run import CASES, exact
+from pareto.hard_cases import HARD_CASES
 
 ROOT = Path(__file__).resolve().parent.parent
 BENCH = ROOT / 'bench'
@@ -130,7 +131,8 @@ def main():
     rows = []
     for rec in stored:
         name = rec['name']
-        case = CASES[name]
+        # кейс может лежать в любом из двух полигонов — берём там, где он есть
+        case = CASES.get(name) or HARD_CASES[name]
         rng = random.Random(SEED)
         pts = sample(case, rng)
 

@@ -5,22 +5,25 @@ Rewrites a floating-point expression into an equivalent one that is more accurat
 Today a compiler gives you two options: keep the exact order of operations and stay slow, or turn on `-ffast-math` and get speed with no guarantees at all. There is nothing in between. This tool builds the full Pareto front over *cost* and *provable error bound*, and lets you pick a point on it.
 
 ```
-$ python -m pareto.cli "x*x - y*y" --domain x=1..2 --domain y=1..2
+$ python -m pareto.cli "x*x - y*y" --domain x=1000..1000.001 --domain y=999.999..1000
 
 input expression: ((x * x) - (y * y))
-model cost: 5.0 | proven error bound: 8.882e-16
+model cost: 5.0 | proven error bound: 2.220e-10
 
 Pareto front (every non-dominated form):
      cost        bound  form
-      5.0    0.000e+00  ((x + y) * (x - y))
+      5.0    1.332e-15  ((x - y) * (y + x))
+      9.8    1.110e-15  fma(x, (x - y), (y * (x - y)))
 
-cheapest form   : ((x + y) * (x - y))
-                  1.00x cheaper, error bound 0.000e+00
-most accurate   : ((x + y) * (x - y))
-                  model error is zero, costs 1.00x
+cheapest form   : ((x - y) * (y + x))
+                  1.00x cheaper, error bound 1.332e-15
+most accurate   : ((x - y) * (y + x))
+                  bound 1.67e+05x smaller, costs 1.00x
 
-paste into code : ((x + y) * (x - y))
+paste into code : ((x - y) * (y + x))
 ```
+
+The domain matters as much as the expression. On `x, y ∈ [1, 2]` this same rewrite buys nothing: the bound stays around 1e-15 either way, because absolute rounding error does not care about cancellation when the operands are far apart. The gain above comes from `x` and `y` being close, which is exactly when the difference of squares destroys significant digits.
 
 ## Why this is not just `-ffast-math`
 
@@ -28,13 +31,15 @@ paste into code : ((x + y) * (x - y))
 
 | case | form | best clang time | our form, same flags | error, clang | error, ours |
 |---|---|---|---|---|---|
-| `x*x - y*y` | difference of squares | 0.153 ms | **0.095 ms** | 1.2e-08 | **1.0e-51** |
-| `log(a) - log(b)` | log ratio | 3.866 ms | **2.036 ms** | 2.3e-16 | **1.3e-16** |
-| `(a/c) + (b/c)` | common divisor | 0.253 ms | 0.253 ms | 7.2e-17 | 7.2e-17 |
-| `(a/b)/c` | division chain | 0.253 ms | 0.253 ms | 1.0e-16 | 1.0e-16 |
-| `exp(a) * exp(b)` | exponent sum | 1.702 ms | 1.725 ms | 3.2e-16 | 3.2e-16 |
+| `x*x - y*y` | difference of squares | 0.178 ms | **0.111 ms** | 1.21e-08 | **1.02e-51** |
+| `log(a) - log(b)` | log ratio | 4.326 ms | **2.279 ms** | 2.29e-16 | **1.30e-16** |
+| `(a/c) + (b/c)` | common divisor | 0.295 ms | 0.295 ms | 7.21e-17 | 7.21e-17 |
+| `(a/b)/c` | division chain | 0.295 ms | 0.295 ms | 1.01e-16 | 1.01e-16 |
+| `exp(a) * exp(b)` | exponent sum | 1.932 ms | 1.932 ms | 3.23e-16 | 3.23e-16 |
+| `sqrt(x+1) - sqrt(x)` | root difference | 1.004 ms | 1.004 ms | 1.99e-07 | 1.99e-07 |
+| poly | cubic polynomial | 0.179 ms | 0.179 ms | 9.45e-16 | 9.45e-16 |
 
-Where the value is: on the difference of squares `-ffast-math` leaves the error at 1.2e-08 — it optimises for speed and never for accuracy — while our form is exact **and** 1.6x faster. On the log ratio the compiler does not do the rewrite at all, we are 1.9x faster with half the error. On the remaining three the compiler already performs the same transformation itself, and that is fine: the two are not competitors. Our rewrite makes `-ffast-math` safe instead of replacing it.
+All seven cases are in the table, including the four where we change nothing. Where the value is: on the difference of squares `-ffast-math` leaves the error at 1.21e-08 — it optimises for speed and never for accuracy — while our form is exact **and** 1.6x faster. On the log ratio the compiler does not do the rewrite at all, we are 1.9x faster with half the error. On the remaining three the compiler already performs the same transformation itself, and that is fine: the two are not competitors. Our rewrite makes `-ffast-math` safe instead of replacing it.
 
 ### Array summation
 
@@ -111,15 +116,15 @@ Scoring someone else's tool with your own metric proves nothing, so the honest t
 
 | case | original | ours | Herbie | verdict |
 |---|---|---|---|---|
-| `diff_sqrt` | 27.197 | 0.319 | 0.331 | tie |
-| `poly` | 0.328 | 0.283 | **0.214** | **Herbie better** |
-| `two_div` | 0.254 | 0.254 | 0.216 | tie |
+| `diff_sqrt` | 27.197 | **0.319** | 0.370 | ours better |
+| `poly` | 0.328 | 0.283 | 0.267 | tie |
+| `two_div` | 0.254 | 0.254 | 0.220 | tie |
 | `div_chain` | 0.267 | 0.267 | 0.267 | tie |
 | `log_ratio` | 0.344 | 0.064 | 0.064 | tie |
-| `exp_sum` | 0.352 | 0.352 | 0.348 | tie |
-| `sq_diff` | 16.476 | 0.122 | 0.130 | tie |
+| `exp_sum` | 0.352 | 0.352 | **0.216** | **Herbie better** |
+| `sq_diff` | 16.476 | 0.122 | 0.122 | tie |
 
-**On Herbie's metric this project wins nothing: six ties and one loss.** Both tools take the two catastrophic cases from tens of bits of error down to a fraction of a bit, and on the rest they land within noise of each other. Anyone told that this tool "beats Herbie on accuracy" was told something false.
+**On Herbie's metric this project is level with him: one win, five ties, one loss.** Both tools take the two catastrophic cases from tens of bits of error down to a fraction of a bit, and on the rest they land within noise of each other. Anyone told that this tool "beats Herbie on accuracy" was told something false.
 
 ### Where the difference actually shows up: price
 
@@ -127,15 +132,15 @@ Herbie has no cost model. It returns a numerically good form and stops there, so
 
 | case | Herbie | ours | speedup | Herbie error | our error |
 |---|---|---|---|---|---|
-| `diff_sqrt` | 2.889 ms | **2.269 ms** | **1.27x** | 2.177e-16 | 2.201e-16 |
-| `poly` | 1.421 ms | **1.322 ms** | **1.08x** | 7.115e-16 | 7.115e-16 |
-| `exp_sum` | 3.580 ms | **3.286 ms** | **1.09x** | 2.188e-16 | 2.465e-16 |
-| `two_div` | 1.014 ms | 1.014 ms | 1.00x | 1.357e-16 | 1.353e-16 |
-| `div_chain` | 1.014 ms | 1.014 ms | 1.00x | 1.646e-16 | 1.646e-16 |
-| `log_ratio` | 2.391 ms | 2.394 ms | 1.00x | 1.302e-16 | 1.302e-16 |
-| `sq_diff` | 0.509 ms | 0.509 ms | 1.00x | 3.064e-09 | 3.064e-09 |
+| `diff_sqrt` | 5.461 ms | **3.763 ms** | **1.45x** | 2.759e-16 | 2.201e-16 |
+| `poly` | **1.680 ms** | 2.182 ms | 0.77x | 7.115e-16 | 7.115e-16 |
+| `exp_sum` | 6.764 ms | **5.434 ms** | **1.24x** | 2.188e-16 | 2.465e-16 |
+| `two_div` | 1.676 ms | 1.676 ms | 1.00x | 1.282e-16 | 1.353e-16 |
+| `div_chain` | 1.676 ms | 1.676 ms | 1.00x | 1.646e-16 | 1.646e-16 |
+| `log_ratio` | 3.955 ms | 3.968 ms | 1.00x | 1.314e-16 | 1.302e-16 |
+| `sq_diff` | 0.841 ms | 0.841 ms | 1.00x | 3.064e-09 | 3.064e-09 |
 
-**Faster on three of seven, slower on none, geometric mean 1.06x, accuracy level throughout.** That is the honest size of the win: not an order of magnitude, a few percent on average and a quarter on the best case — earned by having a cost model where the other tool has none. Reproduce with `python pareto/run_vs_herbie_speed.py`.
+**Faster on two of seven, slower on one, geometric mean 1.05x, accuracy level throughout.** That is the honest size of the win: not an order of magnitude, a few percent on average and 1.45x on the best case — earned by having a cost model where the other tool has none. On `poly` we lose: his form is 1.3x faster at identical accuracy, and our cost model preferred the wrong point. Reproduce with `python pareto/run_vs_herbie_speed.py`.
 
 Worth stating plainly: on these seven cases both tools have hit the floor of double precision. Worst observed error is one to two ulps on either side, so "more accurate than Herbie" is not a thing that can be won here by anyone.
 
@@ -176,6 +181,28 @@ Hardware FMA is not part of baseline x86-64. Without `-mfma` or `-march=native` 
 
 Fix: `fma` now costs *more* than a multiply-add pair by default (`PARETO_FMA_COST`, set it to `1.0` on a machine where FMA is enabled). The exact form came back, and the accuracy result with it. This is the same lesson the project already learned once on summation — an analytical cost model without calibration will confidently pick a worse form.
 
+## The harder benchmark
+
+The seven cases above are too easy for a comparison: after rewriting both tools sit at one or two ulps, which is the floor of double precision, and any difference there is noise. `pareto/hard_cases.py` adds nine problems from actual numerical analysis, where the error as written runs into tens of bits. Scoreboard, both rulers at once (`python pareto/run_hard_scoreboard.py`):
+
+| case | as written | ours | Herbie | our bound | his bound | our cost | his cost |
+|---|---|---|---|---|---|---|---|
+| `sq_expand` — `(a+b)²−(a−b)²` | 34.01 | **0.00** | 0.00 | 8.88e-15 | 8.88e-15 | 4.0 | 4.0 |
+| `hypot` — `sqrt(x²+y²)` | 61.09 | **0.00** | 0.00 | 1.57e+139 | 1.57e+139 | 24.0 | 24.0 |
+| `exp_minus_one` — `exp(x)−1` | 19.46 | **0.00** | 0.24 | **1.11e-22** | 2.22e-22 | 44.0 | 15.6 |
+| `log_one_plus` — `log(1+x)` | 19.49 | **0.00** | 0.27 | 1.11e-22 | 1.11e-22 | 44.0 | 44.0 |
+| `cube_diff` — `x³−y³` | 16.39 | **0.15** | 0.16 | 2.44e-12 | 2.44e-12 | 15.6 | 15.6 |
+| `ratio_cancel` — `(x²−1)/(x−1)` | 8.02 | 0.25 | 0.25 | 2.22e-16 | 2.22e-16 | 2.0 | 2.0 |
+| `exp_series` — Taylor, 8 terms | 0.53 | 0.28 | 0.28 | 1.03e-14 | 1.03e-14 | 73.0 | 35.2 |
+| `quadratic_root` | 47.14 | 0.51 | **0.26** | 5.55e-22 | 4.44e-23 | 60.6 | 27.0 |
+| `variance` — `E[x²]−E[x]²` | 43.74 | 43.11 | n/a | 7.52e-04 | — | 49.8 | — |
+
+**Two wins, five ties, one loss, and one case where his answer uses operations we do not have.** Numbers are mean bits of error over 1500 sampled inputs, same reference for both.
+
+Three things carry those results. `expm1`, `log1p` and `hypot` as first-class operations — real identities, not approximations, and they close three cases outright. Constant folding, without which the tool emitted `(2+2)*(b*a)` and lost on price to `a*(4*b)` for no reason at all. And Taylor series as **certified** candidates: the Lagrange remainder, bounded by the maximum derivative over the domain, is added to the rounding error of the polynomial itself, so the printed bound covers the method error too. Herbie substitutes series as well, but ships no guarantee with them.
+
+The remaining loss is honest: on the quadratic formula he expands in the small parameter and then cancels the division symbolically, ending at `−c/b − ac²/b³`. We reach 0.51 bits from 47.14 by the same kind of expansion, but keep a common factor we cannot cancel — that needs a conditional rewrite rule, and conditional rules are where this project has already broken correctness once.
+
 ## What is not new here
 
 Being explicit about this, because it is the first question any compiler person asks:
@@ -196,6 +223,26 @@ What is new is the combination: **both metrics computed together**, an error bud
 - Interval arithmetic ignores correlation between repeated variables, so bounds are conservative — measured at median x2.42, see "How loose is the bound".
 - Saturation on expressions with roots reaches thousands of nodes and extraction takes seconds, see "What the search costs".
 
+## The bound once lied, and how that was found
+
+On 25.09.2026 an outside reviewer ran the CLI on the very example this README opened with and reported that the printed bound was **zero** while the real error reached 6.7e-16. He was right, and the cause was three characters of code:
+
+```python
+def iv_sub(a, b): return (a[0] - b[0], a[1] - b[1])   # wrong
+def iv_sub(a, b): return (a[0] - b[1], a[1] - b[0])   # correct
+```
+
+Interval subtraction was written coordinate-wise. On `[1,2] − [1,2]` it returned `(0, 0)` instead of `(−1, 1)`, the interval collapsed to a point, and since rounding error is computed as `U · max|interval|`, the "proven bound" collapsed with it. Every number this project printed as a guarantee was suspect for as long as that line existed.
+
+Worse than the bug is why the tests stayed green. `test_bound.py` exercised `sq_diff` on a narrow domain around 1000, where the broken interval was still non-zero and happened to cover the measurement. The README example was in no test at all. A test suite that only visits the places you already trust is decoration.
+
+What changed, beyond the one-line fix:
+
+- `tests/test_intervals.py` is property-based — random intervals per operation, a grid of points inside, and the result must lie within the interval the analysis returned. It fails on **any** operation that is wrong, not only on the one someone remembered.
+- The README example is now its own regression test, on the exact domain where the bound used to be zero.
+- One old test had to be rewritten: it demanded that `x*x − y*y` be rewritten on `[1,2]×[1,2]`, and it only ever passed because the bound there was zero. On that domain the rewrite genuinely buys nothing.
+- Every benchmark table below was regenerated from scratch afterwards. The conclusions held; several bounds grew, which is what a fix in this direction should do.
+
 ## The bound is tested, not asserted
 
 `tests/test_bound.py` rebuilds the Pareto front and checks, on every form it finds, that the error actually measured against a 60-digit `Decimal` reference never exceeds the bound the analysis proved. Inputs are drawn pseudo-randomly with a fixed seed plus the domain corners — deliberately not a uniform grid, since cancellation lives in narrow spots a grid can step over.
@@ -204,7 +251,7 @@ What is new is the combination: **both metrics computed together**, an error bud
 
 Interval arithmetic ignores correlation between repeated occurrences of the same variable, so the bound is conservative by construction. That is a real weakness and it deserves a number rather than a disclaimer, so `pareto/run_tightness.py` measures it: proven bound divided by the largest error observed over 600 random points plus both corners.
 
-Across the 15 forms on the benchmark fronts: **never below the measured error, looseness from x1.44 to x664, median x2.42.** A factor of two or three is the normal price of a worst-case guarantee; the x664 outlier is the most accurate `diff_sqrt` form, where the real error is near zero and any bound looks huge next to it.
+Across the 15 forms on the benchmark fronts: **never below the measured error, looseness from x1.44 to x664, median x2.58.** A factor of two or three is the normal price of a worst-case guarantee; the x664 outlier is the most accurate `diff_sqrt` form, where the real error is near zero and any bound looks huge next to it.
 
 The adversarial group is the interesting one — expressions where the same variable repeats, the worst case for intervals:
 

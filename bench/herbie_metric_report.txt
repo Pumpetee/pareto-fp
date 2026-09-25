@@ -2,35 +2,35 @@ Head-to-head on HERBIE'S metric: average bits of error over 4000 sampled inputs 
 Reference: 60-digit Decimal evaluation of the original expression, rounded to double.
 
 case          original      ours    herbie   verdict
-diff_sqrt       27.197     0.319     0.331   tie
-poly             0.328     0.283     0.214   HERBIE BETTER
-two_div          0.254     0.254     0.216   tie
+diff_sqrt       27.197     0.319     0.370   ours better
+poly             0.328     0.283     0.267   tie
+two_div          0.254     0.254     0.220   tie
 div_chain        0.267     0.267     0.267   tie
 log_ratio        0.344     0.064     0.064   tie
-exp_sum          0.352     0.352     0.348   tie
-sq_diff         16.476     0.122     0.130   tie
+exp_sum          0.352     0.352     0.216   HERBIE BETTER
+sq_diff         16.476     0.122     0.122   tie
 
-ours better on 0, tie on 6, Herbie better on 1 out of 7 cases.
+ours better on 1, tie on 5, Herbie better on 1 out of 7 cases.
 
 Forms compared:
   diff_sqrt
-    ours  : (1 / (sqrt(x) + sqrt((x + 1))))
-    herbie: (1 / (sqrt(x) + sqrt((x * ((1 + x) / x)))))
+    ours  : (1 / (sqrt(x) + sqrt((1 + x))))
+    herbie: (1 / ((1 / (sqrt(x) / x)) + sqrt((1 + x))))
   poly
-    ours  : fma(fma(fma(4.5, x, 3.5), x, 2.5), x, 1.5)
-    herbie: fma(x, fma((4.5 * x), x, 2.5), fma((3.5 * x), x, 1.5))
+    ours  : fma(x, fma(fma(x, 4.5, 3.5), x, 2.5), 1.5)
+    herbie: fma((x * x), fma(4.5, x, 3.5), (1.5 + (2.5 * x)))
   two_div
-    ours  : ((b / c) + (a / c))
-    herbie: fma(a, (1 / c), (b / c))
+    ours  : ((a / c) + (b / c))
+    herbie: fma(b, (1 / c), (a / c))
   div_chain
     ours  : ((a / b) / c)
     herbie: ((a / b) / c)
   log_ratio
     ours  : log((a / b))
-    herbie: log((a / b))
+    herbie: -log((b / a))
   exp_sum
-    ours  : (exp(b) * exp(a))
-    herbie: (exp(b) / exp(-a))
+    ours  : (exp(a) * exp(b))
+    herbie: sqrt((exp((a + a)) * exp((b + b))))
   sq_diff
     ours  : fma(x, (x - y), (y * (x - y)))
-    herbie: fma(y, (x - y), ((x - y) * x))
+    herbie: fma(x, (x - y), ((x - y) * y))

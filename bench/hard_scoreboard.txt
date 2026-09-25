@@ -4,9 +4,9 @@ bound = proven worst-case absolute error, cost = our machine-cost model.
 
 case              written    ours  herbie     our bound   его bound  our cost  his cost
 quadratic_root      47.14    0.51    0.26      5.55e-22    4.44e-23      60.6      27.0
-variance            43.74   43.11     n/a      7.28e-04           -      46.6         -
+variance            43.74   43.11     n/a      7.52e-04           -      49.8         -
 sq_expand           34.01    0.00    0.00      8.88e-15    8.88e-15       4.0       4.0
-cube_diff           16.39    0.16    0.16      1.22e-12    1.22e-12      15.6      15.6
+cube_diff           16.39    0.15    0.16      2.44e-12    2.44e-12      15.6      15.6
 exp_minus_one       19.46    0.00    0.24      1.11e-22    2.22e-22      44.0      15.6  <- our front has a cheaper point at no worse bound
 log_one_plus        19.49    0.00    0.27      1.11e-22    1.11e-22      44.0      44.0
 exp_series           0.53    0.28    0.28      1.03e-14    1.03e-14      73.0      35.2
@@ -20,13 +20,13 @@ forms:
     ours  : ((-(((4 * a) * c) / b) * ((-0.125 * -(((4 * a) * c) / (b * b))) + 0.5)) / (2 * a))
     herbie: ((((-a * c) * c) / ((b * b) * b)) - (c / b))
   variance
-    ours  : ((fma(a, a, fma(b, b, (c * c))) / 3) - fma(0.2222222222222222, fma(c, b, (b * a)), (fma(fma(2, c, a), a, ((b * b) + (c * c))) / 9)))
+    ours  : fma(b, (b / 3), ((fma(a, a, (c * c)) / 3) - (fma((a + b), ((b + c) + (c + a)), (c * c)) / 9)))
     herbie: outside our operation set
   sq_expand
-    ours  : ((b * a) * 4)
+    ours  : ((4 * a) * b)
     herbie: (a * (4 * b))
   cube_diff
-    ours  : fma((x - y), fma(x, x, (x * y)), ((y * y) * (x - y)))
+    ours  : fma(fma(x, x, (y * y)), (x - y), ((x * y) * (x - y)))
     herbie: fma((x - y), fma(y, y, (x * x)), ((x - y) * (y * x)))
   exp_minus_one
     ours  : fma(x, (fma(0.16666666666666666, x, 0.5) * x), x)
@@ -35,7 +35,7 @@ forms:
     ours  : fma(x, (fma(fma(-0.25, x, 0.3333333333333333), x, -0.5) * x), x)
     herbie: log1p(x)
   exp_series
-    ours  : fma(fma((((x * x) * ((x / 720) + ((x * x) / 5040))) + (((x * x) / 120) + (x / 24))), x, (x / 6)), (x * x), fma((x / 2), x, (1 + (x / 1))))
+    ours  : fma(fma((((x * x) * (((x * x) / 5040) + (x / 720))) + (((x * x) / 120) + (x / 24))), x, (x / 6)), (x * x), fma(x, (x / 2), (1 + (x / 1))))
     herbie: fma(x, fma(((fma(0.0001984126984126984, x, 0.001388888888888889) * x) * ((x * x) * x)), x, fma(x, fma(x, fma(fma(0.008333333333333333, x, 0.041666666666666664), x, 0.16666666666666666), 0.5), 1)), 1)
   hypot
     ours  : hypot(y, x)

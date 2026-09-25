@@ -7,14 +7,14 @@
    "worst_bits": 29.960116903069135
   },
   "ours": {
-   "form": "(1 / (sqrt(x) + sqrt((x + 1))))",
+   "form": "(1 / (sqrt(x) + sqrt((1 + x))))",
    "mean_bits": 0.31930225625468744,
    "worst_bits": 1.584962500721156
   },
   "herbie": {
-   "form": "(1 / (sqrt(x) + sqrt((x * ((1 + x) / x)))))",
-   "mean_bits": 0.33142970000576916,
-   "worst_bits": 1.584962500721156
+   "form": "(1 / ((1 / (sqrt(x) / x)) + sqrt((1 + x))))",
+   "mean_bits": 0.3700195500086537,
+   "worst_bits": 2.0
   }
  },
  {
@@ -25,14 +25,14 @@
    "worst_bits": 1.584962500721156
   },
   "ours": {
-   "form": "fma(fma(fma(4.5, x, 3.5), x, 2.5), x, 1.5)",
+   "form": "fma(x, fma(fma(x, 4.5, 3.5), x, 2.5), 1.5)",
    "mean_bits": 0.2828349625007212,
    "worst_bits": 1.584962500721156
   },
   "herbie": {
-   "form": "fma(x, fma((4.5 * x), x, 2.5), fma((3.5 * x), x, 1.5))",
-   "mean_bits": 0.2145,
-   "worst_bits": 1.0
+   "form": "fma((x * x), fma(4.5, x, 3.5), (1.5 + (2.5 * x)))",
+   "mean_bits": 0.2671887218755409,
+   "worst_bits": 1.584962500721156
   }
  },
  {
@@ -43,13 +43,13 @@
    "worst_bits": 1.0
   },
   "ours": {
-   "form": "((b / c) + (a / c))",
+   "form": "((a / c) + (b / c))",
    "mean_bits": 0.25425,
    "worst_bits": 1.0
   },
   "herbie": {
-   "form": "fma(a, (1 / c), (b / c))",
-   "mean_bits": 0.21625,
+   "form": "fma(b, (1 / c), (a / c))",
+   "mean_bits": 0.22025,
    "worst_bits": 1.0
   }
  },
@@ -84,8 +84,8 @@
    "worst_bits": 1.0
   },
   "herbie": {
-   "form": "log((a / b))",
-   "mean_bits": 0.0635,
+   "form": "-log((b / a))",
+   "mean_bits": 0.064,
    "worst_bits": 1.0
   }
  },
@@ -97,14 +97,14 @@
    "worst_bits": 1.584962500721156
   },
   "ours": {
-   "form": "(exp(b) * exp(a))",
+   "form": "(exp(a) * exp(b))",
    "mean_bits": 0.3516511281273437,
    "worst_bits": 1.584962500721156
   },
   "herbie": {
-   "form": "(exp(b) / exp(-a))",
-   "mean_bits": 0.3484011281273437,
-   "worst_bits": 1.584962500721156
+   "form": "sqrt((exp((a + a)) * exp((b + b))))",
+   "mean_bits": 0.21625,
+   "worst_bits": 1.0
   }
  },
  {
@@ -120,8 +120,8 @@
    "worst_bits": 1.0
   },
   "herbie": {
-   "form": "fma(y, (x - y), ((x - y) * x))",
-   "mean_bits": 0.1295,
+   "form": "fma(x, (x - y), ((x - y) * y))",
+   "mean_bits": 0.122,
    "worst_bits": 1.0
   }
  }
