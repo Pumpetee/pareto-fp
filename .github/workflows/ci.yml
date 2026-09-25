@@ -80,7 +80,11 @@ jobs:
           distribution: temurin
           java-version: '25'
 
+      # 26.09.2026: этот шаг упал, и Daisy за ним просто не запустилась — колонка
+      # осталась пустой из-за чужого инструмента. Теперь провал FPTaylor не мешает
+      # Daisy: run_rivals.py сам проставит n/a тому, кого не нашёл.
       - name: FPTaylor (js_of_ocaml build published by its authors)
+        continue-on-error: true
         run: |
           git clone --depth 1 -b gh-pages https://github.com/monadius/FPTaylorJS fptaylor-gh-pages
           git clone --depth 1 https://github.com/monadius/FPTaylorJS fptaylor-src
@@ -88,11 +92,15 @@ jobs:
           node tools/fptaylor_js/extract_config.js fptaylor-src/src/default_config.js
 
       - name: FPTaylor answers a known question
+        continue-on-error: true
         run: |
           printf 'Variables\n  real x in [1, 20];\n\nExpressions\n  r rnd64= x + x;\n' > /tmp/t.txt
-          node tools/fptaylor_js/run.js /tmp/t.txt | grep -q '7.10542735761e-15'
+          # Вывод печатаем: grep -q его проглатывал, и было непонятно, что сломалось у них.
+          node tools/fptaylor_js/run.js /tmp/t.txt | tee /tmp/fpt_out.txt
+          grep -q '7.10542735761e-15' /tmp/fpt_out.txt
 
       - name: Daisy
+        if: always()
         run: |
           sudo apt-get update && sudo apt-get install -y libmpfr-dev
           git clone --depth 1 https://github.com/malyzajko/daisy ../daisy
@@ -101,17 +109,20 @@ jobs:
           sbt compile script
 
       - name: Daisy reproduces the number from its own README
+        if: always()
         run: |
           cd ../daisy
           ./daisy --silent testcases/rosa/Doppler.scala | grep -q '4.1911988101104756e-13'
 
       - name: head-to-head on FPBench
+        if: always()
         env:
           FPTAYLOR_JS: tools/fptaylor_js
           DAISY_HOME: ${{ github.workspace }}/../daisy
         run: python pareto/run_rivals.py
 
       - name: publish raw numbers
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: rivals-results

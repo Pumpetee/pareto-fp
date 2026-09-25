@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import math
 
-from pareto.analysis import (eval_interval, iv_abs_max, iv_abs_min, tighten)
+from pareto.analysis import (eval_interval, iv_abs_max, iv_abs_min, op_unit, tighten)
 from pareto.symbolic_error import ErrForm, node_key
 
 INF = float('inf')
@@ -49,7 +49,9 @@ def symbolic_error(tree, domain):
         return None, None
 
     key = node_key(tree)
-    mag = iv_abs_max(out_iv)
+    # Тот же бюджет округления по операциям, что и в интервальном пути: иначе
+    # символическая форма осталась бы несостоятельной на exp/log (дефект 26.09.2026).
+    mag = iv_abs_max(out_iv) * op_unit(op)
 
     if op == 'neg':
         return errs[0].scaled(-1.0), out_iv
