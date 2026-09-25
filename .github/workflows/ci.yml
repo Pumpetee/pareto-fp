@@ -99,6 +99,17 @@ jobs:
           node tools/fptaylor_js/run.js /tmp/t.txt | tee /tmp/fpt_out.txt
           grep -q '7.10542735761e-15' /tmp/fpt_out.txt
 
+      # 26.09.2026: прогон упал на `sbt: command not found` — sbt убрали из образа
+      # ubuntu-latest. Ставим лаунчер сами с релизов проекта: это не зависит ни от
+      # состава образа, ни от чужого apt-репозитория.
+      - name: sbt
+        if: always()
+        run: |
+          curl -fsSL https://github.com/sbt/sbt/releases/download/v1.11.3/sbt-1.11.3.tgz -o /tmp/sbt.tgz
+          sudo tar xzf /tmp/sbt.tgz -C /opt
+          echo "/opt/sbt/bin" >> $GITHUB_PATH
+          /opt/sbt/bin/sbt --version
+
       - name: Daisy
         if: always()
         run: |
