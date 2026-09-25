@@ -32,6 +32,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from pareto.codegen import to_text
 from pareto.parser import parse
+from pareto.fma_compat import fma as exact_fma
 from pareto.run import CASES, exact
 from pareto.hard_cases import HARD_CASES
 
@@ -99,7 +100,7 @@ def eval_float(tree, env):
         return a / b
     if op == 'fma':
         c = eval_float(tree[3], env)
-        return math.fma(a, b, c) if hasattr(math, 'fma') else a * b + c
+        return exact_fma(a, b, c)
     raise AssertionError('unknown node: ' + op)
 
 

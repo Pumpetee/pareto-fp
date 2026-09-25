@@ -25,7 +25,7 @@ from pareto.egraph import EGraph
 from pareto.rules import RULES
 from pareto.run import CASES, exact, rel_error
 from pareto.run_native import recompute_points
-from pareto.toolchain import TIMER_C, find_clang, link_flags
+from pareto.toolchain import TIMER_C, find_clang, fma_flags, link_flags
 
 ROOT = Path(__file__).resolve().parent.parent
 BENCH = ROOT / 'bench'
@@ -40,7 +40,7 @@ MODES = [
     # Без разрешения на аппаратную FMA (её нет в базовом x86-64) вызов fma() уходит
     # в libm — корректно округляемая, но дорогая функция. Формы с fma в этом режиме
     # проигрывают в разы, и без отдельной строки в таблице это выглядит как дефект.
-    ('fma', ['-O3', '-ffp-contract=off', '-mfma']),
+    ('fma', ['-O3', '-ffp-contract=off'] + fma_flags()),
     ('fast', ['-O3', '-ffast-math']),
 ]
 

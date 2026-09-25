@@ -21,6 +21,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from pareto.analysis import pareto_extract
+from pareto.fma_compat import fma as exact_fma
 from pareto.egraph import EGraph
 from pareto.rules import RULES
 from pareto.run import CASES, exact
@@ -61,8 +62,7 @@ def eval_float(tree, env):
     if op == '/':
         return a / b
     if op == 'fma':
-        return math.fma(a, b, eval_float(tree[3], env)) if hasattr(math, 'fma') \
-            else a * b + eval_float(tree[3], env)
+        return exact_fma(a, b, eval_float(tree[3], env))
     raise AssertionError('unknown node: ' + op)
 
 

@@ -82,3 +82,17 @@ TIMER_C = r'''
   }
 #endif
 '''
+
+
+def fma_flags():
+    """Флаги, включающие аппаратную FMA, — они зависят от архитектуры.
+
+    `-mfma` существует только на x86: на arm64 clang отвергает его целиком, и прогон
+    падал на macOS-раннере CI («unsupported option '-mfma' for target arm64»). На ARM
+    FMA входит в базовый набор инструкций, отдельный флаг не нужен и не существует.
+    """
+    import platform
+    machine = platform.machine().lower()
+    if machine in ('arm64', 'aarch64'):
+        return []
+    return ['-mfma']

@@ -21,6 +21,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from pareto.fma_compat import fma as exact_fma
 from pareto.rules import RULES
 
 SEED = 20260925
@@ -52,8 +53,7 @@ def evaluate(pattern, env):
     if op == 'hypot':
         return math.hypot(*kids)
     if op == 'fma':
-        return math.fma(kids[0], kids[1], kids[2]) if hasattr(math, 'fma') \
-            else kids[0] * kids[1] + kids[2]
+        return exact_fma(kids[0], kids[1], kids[2])
     if op == '+':
         return kids[0] + kids[1]
     if op == '-':
