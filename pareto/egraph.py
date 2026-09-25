@@ -170,14 +170,20 @@ class EGraph:
 
     # ---------- насыщение ----------
     def fold_constants(self):
-        """Считает узлы, у которых все аргументы — числа, и сливает их с результатом.
+        """Сворачивает узлы из одних чисел — но ТОЛЬКО когда результат точен.
 
-        Без этого шага переписывание выдавало формы вроде `(2 + 2) * (b * a)`: сложение
-        двойки с двойкой выполнялось в рантайме на каждом вызове. Herbie на том же кейсе
-        отдавал `a * (4 * b)` и выигрывал у нас по стоимости на ровном месте — не лучшим
-        поиском, а тем, что не тащил в код арифметику, известную на этапе компиляции.
+        ⛔ Здесь была ошибка, найденная фаззингом 25.09.2026. Свёртка выполнялась в
+        обычном double, и её результат объявлялся точной константой с нулевой
+        ошибкой. Но `(-3.34/1.923) + 2.508` в double даёт округлённое число, и форма
+        `x / 0.771130525221009` получала границу 1.37e-09 при реальной ошибке
+        1.55e-09 — граница оказывалась НИЖЕ факта, то есть врала.
+
+        Теперь каждая свёртка проверяется в точной рациональной арифметике: если
+        double представляет результат ровно, узел сворачивается, иначе остаётся как
+        есть. Логарифмы, экспоненты и корни почти никогда не точны, поэтому не
+        сворачиваются вовсе — кроме случаев вроде sqrt(4).
         """
-        import math as _m
+        from fractions import Fraction
 
         def value(eid):
             for n in self.classes.get(self.uf.find(eid), ()):
@@ -185,47 +191,50 @@ class EGraph:
                     return n[1]
             return None
 
+        def exact_fold(op, vals):
+            """Точный результат как Fraction, либо None, если точность не гарантируется."""
+            fr = [Fraction(v) for v in vals]
+            if op == '+':
+                return fr[0] + fr[1]
+            if op == '-':
+                return fr[0] - fr[1]
+            if op == '*':
+                return fr[0] * fr[1]
+            if op == '/':
+                return None if fr[1] == 0 else fr[0] / fr[1]
+            if op == 'neg':
+                return -fr[0]
+            if op == 'fma':
+                return fr[0] * fr[1] + fr[2]
+            if op == 'sqrt':
+                if fr[0] < 0:
+                    return None
+                import math as _m
+                r = _m.sqrt(vals[0])
+                return Fraction(r) if Fraction(r) * Fraction(r) == fr[0] else None
+            return None          # exp, log, expm1, log1p, hypot — точными не бывают
+
         merged = 0
         for eid in list(self.classes):
             for n in list(self.classes.get(self.uf.find(eid), ())):
                 op = n[0]
-                if op in LEAVES:      # approx тоже лист: внутрь не лезем
+                if op in LEAVES:      # approx и eft тоже листья: внутрь не лезем
                     continue
                 vals = [value(k) for k in n[1:]]
                 if any(v is None for v in vals):
                     continue
                 try:
-                    if op == '+':
-                        r = vals[0] + vals[1]
-                    elif op == '-':
-                        r = vals[0] - vals[1]
-                    elif op == '*':
-                        r = vals[0] * vals[1]
-                    elif op == '/':
-                        r = vals[0] / vals[1]
-                    elif op == 'neg':
-                        r = -vals[0]
-                    elif op == 'sqrt':
-                        r = _m.sqrt(vals[0])
-                    elif op == 'exp':
-                        r = _m.exp(vals[0])
-                    elif op == 'log':
-                        r = _m.log(vals[0])
-                    elif op == 'expm1':
-                        r = _m.expm1(vals[0])
-                    elif op == 'log1p':
-                        r = _m.log1p(vals[0])
-                    elif op == 'hypot':
-                        r = _m.hypot(vals[0], vals[1])
-                    elif op == 'fma':
-                        r = vals[0] * vals[1] + vals[2]
-                    else:
-                        continue
+                    exact = exact_fold(op, vals)
                 except (ValueError, ZeroDivisionError, OverflowError):
                     continue
-                if not _m.isfinite(r):
+                if exact is None:
                     continue
-                self.merge(self.uf.find(eid), self.add_node(('num', float(r))))
+                r = float(exact)
+                # double обязан представлять результат ровно, иначе это уже не свёртка,
+                # а незаметная подмена выражения его приближением
+                if not (r == r and abs(r) != float('inf')) or Fraction(r) != exact:
+                    continue
+                self.merge(self.uf.find(eid), self.add_node(('num', r)))
                 merged += 1
         if merged:
             self.rebuild()
@@ -257,6 +266,16 @@ class EGraph:
             return False
         lo, hi = iv
         return lo > 0.0 or hi < 0.0
+
+    def nonneg(self, eid):
+        """Класс заведомо неотрицателен на домене — нужно для правил с корнем."""
+        iv = self.ivs.get(self.uf.find(eid))
+        return iv is not None and iv[0] >= 0.0
+
+    def positive(self, eid):
+        """Класс заведомо строго положителен — нужно для правил с логарифмом."""
+        iv = self.ivs.get(self.uf.find(eid))
+        return iv is not None and iv[0] > 0.0
 
     def saturate(self, rules, iters=8, node_limit=60000, domain=None):
         """rules: список (lhs, rhs, двусторонее?) или (lhs, функция).

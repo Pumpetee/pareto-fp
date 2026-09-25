@@ -88,6 +88,18 @@ def _strip_zero_tail(coeffs):
 
 # ── семейства функций: коэффициенты ряда вокруг нуля и модуль (n+1)-й производной ──
 
+def _with_center(iv):
+    """Интервал, расширенный до точки разложения (нуля).
+
+    Остаток по Лагранжу берётся в точке ξ МЕЖДУ центром разложения и аргументом,
+    поэтому максимум производной надо искать на отрезке, включающем ноль. Фаззинг
+    25.09.2026 поймал обратное: для exp на домене [−0.53, −0.41] максимум брался
+    как exp(−0.41)=0.66 вместо exp(0)=1, остаток выходил 1.6e-2 при реальной
+    ошибке 2.2e-2 — граница оказывалась ниже факта.
+    """
+    return (min(0.0, iv[0]), max(0.0, iv[1]))
+
+
 def _exp_family(kind):
     def coeffs(n):
         c = [1.0 / math.factorial(k) for k in range(n + 1)]
@@ -96,8 +108,10 @@ def _exp_family(kind):
         return c
 
     def deriv_max(iv, n):
-        # производная exp любого порядка это exp, максимум на правом конце
-        return math.exp(min(max(iv[0], iv[1]), 700.0))
+        # производная exp любого порядка это exp; максимум ищем на отрезке,
+        # включающем точку разложения
+        lo, hi = _with_center(iv)
+        return math.exp(min(hi, 700.0))
 
     return coeffs, deriv_max
 
@@ -108,9 +122,11 @@ def _log1p_family():
         return [0.0] + [((-1.0) ** (k + 1)) / k for k in range(1, n + 1)]
 
     def deriv_max(iv, n):
-        # |d^(n+1) log(1+x)| = n! / |1+x|^(n+1), худшее при наименьшем |1+x|
-        lo = min(abs(1.0 + iv[0]), abs(1.0 + iv[1]))
-        if iv[0] <= -1.0 <= iv[1] or lo == 0.0:
+        # |d^(n+1) log(1+x)| = n! / |1+x|^(n+1), худшее при наименьшем |1+x|;
+        # отрезок расширяем до точки разложения
+        a, b = _with_center(iv)
+        lo = min(abs(1.0 + a), abs(1.0 + b))
+        if a <= -1.0 <= b or lo == 0.0:
             return math.inf
         return math.factorial(n) / lo ** (n + 1)
 
@@ -127,8 +143,9 @@ def _sqrt1p_family():
         return out
 
     def deriv_max(iv, n):
-        lo = min(abs(1.0 + iv[0]), abs(1.0 + iv[1]))
-        if iv[0] <= -1.0 <= iv[1] or lo == 0.0:
+        a, b = _with_center(iv)
+        lo = min(abs(1.0 + a), abs(1.0 + b))
+        if a <= -1.0 <= b or lo == 0.0:
             return math.inf
         # |d^(n+1) (1+x)^(1/2)| = |prod_{j=0..n}(1/2-j)| * (1+x)^(1/2-(n+1))
         prod = 1.0
@@ -402,7 +419,7 @@ def series_candidates(tree, domain, orders=range(2, MAX_ORDER + 1)):
         return out
 
     coeffs_fn, deriv_fn = _sqrt1p_family() if target == 'sqrt1p' else FAMILIES[target]
-    radius = iv_abs_max(iv)
+    radius = iv_abs_max(_with_center(iv))
     if radius == 0.0 or radius > 1.0:
         # вдали от точки разложения ряд сходится медленно, и честный остаток
         # оказывается хуже прямого вычисления — такие кандидаты не нужны

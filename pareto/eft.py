@@ -61,7 +61,8 @@ def _div_sum_candidate(node):
     q = ('/', s, c)
     p, pe = two_prod(q, c)
     rest = ('+', ('-', ('-', s, p), pe), err)
-    return [('+', q, ('/', rest, c))]
+    # компенсируются оба уровня: и сложение в числителе, и само деление
+    return [(('+', q, ('/', rest, c)), 2)]
 
 
 def _diff_of_products_candidate(node):
@@ -80,7 +81,8 @@ def _diff_of_products_candidate(node):
     c, d = right[1], right[2]
     w = ('*', c, d)
     e = ('fma', c, d, ('neg', w))
-    return [('-', ('fma', a, b, ('neg', w)), e)]
+    # компенсируется вычитание и оба произведения под ним
+    return [((('-', ('fma', a, b, ('neg', w)), e)), 2)]
 
 
 def _exp_product_candidate(node):
@@ -97,7 +99,8 @@ def _exp_product_candidate(node):
         return []
     s, err = two_sum(l[1], r[1])
     base = ('exp', s)
-    return [('fma', base, err, base)]
+    # компенсируется только сумма показателей: саму exp схема не уточняет
+    return [((('fma', base, err, base)), 1)]
 
 
 def _prod_with_sum_candidate(node):
@@ -122,7 +125,8 @@ def _prod_with_sum_candidate(node):
         # именно это округление остаётся в результате. Поэтому произведение тоже
         # раскладывается TwoProduct, и обе ошибки возвращаются одним сложением.
         p, pe = two_prod(u, s)
-        out.append(('+', p, ('fma', u, err, pe)))
+        # компенсируются умножение и сумма под ним
+        out.append(((('+', p, ('fma', u, err, pe))), 2))
     return out
 
 
@@ -140,7 +144,8 @@ def _div_chain_candidate(node):
     q = ('/', a, p)
     r1, r1e = two_prod(q, p)
     rest = ('-', ('-', ('-', a, r1), r1e), ('*', q, pe))
-    return [('+', q, ('/', rest, p))]
+    # компенсируются оба деления и произведение знаменателя
+    return [((('+', q, ('/', rest, p))), 2)]
 
 
 def _div_by_sum_candidate(node):
@@ -162,7 +167,8 @@ def _div_by_sum_candidate(node):
     q = ('/', u, s)
     p, pe = two_prod(q, s)
     rest = ('-', ('-', ('-', u, p), pe), ('*', q, err))
-    return [('+', q, ('/', rest, s))]
+    # компенсируются деление и сумма в знаменателе
+    return [((('+', q, ('/', rest, s))), 2)]
 
 
 def _log_of_quotient_candidate(node):
@@ -178,7 +184,8 @@ def _log_of_quotient_candidate(node):
     q = ('/', a, b)
     resid = ('fma', ('neg', q), b, a)          # a − q·b, точно
     delta = ('/', resid, ('*', q, b))
-    return [('+', ('log', q), ('log1p', delta))]
+    # компенсируется деление под логарифмом, сам логарифм — нет
+    return [((('+', ('log', q), ('log1p', delta))), 1)]
 
 
 def _as_horner(node, var=None):
@@ -238,7 +245,8 @@ def _comp_horner_candidate(node):
         s2, se = two_sum(p, c)
         corr = ('+', ('fma', corr, x, pe), se)
         s = s2
-    return [('+', s, corr)]
+    # компенсируется вся схема Горнера сверху донизу
+    return [((('+', s, corr)), 99)]
 
 
 BUILDERS = (_div_sum_candidate, _diff_of_products_candidate, _exp_product_candidate,
@@ -259,13 +267,13 @@ def eft_candidates(tree, domain):
 
     def walk(node, rebuild):
         for build in BUILDERS:
-            for cand in build(node):
+            for cand, depth in build(node):
                 # вторым элементом кладём ИСХОДНЫЙ узел: в компенсированной форме
                 # подвыражения дублируются, и интервальная арифметика считает их
                 # независимыми — оценка результата раздувается вчетверо на ровном
                 # месте. Значение-то у обеих форм одно, поэтому интервал берём у
                 # исходной записи.
-                out.append(rebuild(('eft', cand, node)))
+                out.append(rebuild(('eft', cand, node, depth)))
         if node[0] in ('num', 'var', 'approx', 'eft'):
             return
         for i in range(1, len(node)):

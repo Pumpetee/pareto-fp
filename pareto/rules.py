@@ -77,9 +77,11 @@ RULES = [
       ('*', ('-', '?a', '?b'), ('-', '?a', '?b'))),
      ('*', ('num', 4.0), ('*', '?a', '?b')), True),
 
-    # корни и произведения
-    (('*', ('sqrt', '?a'), ('sqrt', '?a')), '?a', False),
-    (('sqrt', ('*', '?a', '?b')), ('*', ('sqrt', '?a'), ('sqrt', '?b')), True),
+    # ⛔ Правила с корнем и логарифмом вынесены вниз и снабжены предусловием:
+    # sqrt(a)·sqrt(a) = a неверно при a < 0, sqrt(a·b) = sqrt(a)·sqrt(b) неверно
+    # при обоих отрицательных, и то же с логарифмом произведения и частного.
+    # Аудит 25.09.2026 показал расхождение по определённости на случайных входах:
+    # одна сторона конечна, другая NaN, а e-граф объединил бы их классы.
 
     # слияние умножения со сложением: fma(a,b,c) = a*b + c, но с ОДНИМ округлением
     # на всю операцию — промежуточное произведение не округляется. Это и есть то,
@@ -87,10 +89,8 @@ RULES = [
     (('+', ('*', '?a', '?b'), '?c'), ('fma', '?a', '?b', '?c'), True),
     (('-', ('*', '?a', '?b'), '?c'), ('fma', '?a', '?b', ('neg', '?c')), True),
 
-    # экспонента и логарифм
-    (('log', ('*', '?a', '?b')), ('+', ('log', '?a'), ('log', '?b')), True),
+    # экспонента — тождество без оговорок
     (('exp', ('+', '?a', '?b')), ('*', ('exp', '?a'), ('exp', '?b')), True),
-    (('log', ('/', '?a', '?b')), ('-', ('log', '?a'), ('log', '?b')), True),
 
     # ── Библиотечные функции для малых аргументов и для переполнения ──
     #
@@ -191,4 +191,63 @@ CANCEL_RULES = [
     (('/', ('*', '?b', '?a'), ('*', '?c', '?a')), _cancel_factor('both')),
     (('/', ('*', '?a', '?b'), '?a'), _cancel_factor('num')),
     (('/', ('*', '?b', '?a'), '?a'), _cancel_factor('num')),
+]
+
+
+# ── Правила, верные только при определённом знаке аргумента ──
+#
+# Проверка знака идёт по интервалу класса: применяем, только если он доказуемо лежит
+# в нужной полуплоскости. Без домена интервалов нет, и правила молчат — это намеренно.
+def _sqrt_square(eg, subst, eid):
+    """sqrt(a)·sqrt(a) = a, только при a ≥ 0."""
+    a = subst['?a']
+    return a if eg.nonneg(a) else None
+
+
+def _sqrt_split(eg, subst, eid):
+    """sqrt(a·b) = sqrt(a)·sqrt(b), только когда оба множителя неотрицательны."""
+    a, b = subst['?a'], subst['?b']
+    if not (eg.nonneg(a) and eg.nonneg(b)):
+        return None
+    return eg.add_node(('*', eg.add_node(('sqrt', a)), eg.add_node(('sqrt', b))))
+
+
+def _sqrt_join(eg, subst, eid):
+    """Обратное: sqrt(a)·sqrt(b) = sqrt(a·b) при неотрицательных аргументах."""
+    a, b = subst['?a'], subst['?b']
+    if not (eg.nonneg(a) and eg.nonneg(b)):
+        return None
+    return eg.add_node(('sqrt', eg.add_node(('*', a, b))))
+
+
+def _log_split(op):
+    """log(a·b) = log a + log b и log(a/b) = log a − log b при положительных a и b."""
+    def build(eg, subst, eid):
+        a, b = subst['?a'], subst['?b']
+        if not (eg.positive(a) and eg.positive(b)):
+            return None
+        return eg.add_node((op, eg.add_node(('log', a)), eg.add_node(('log', b))))
+    return build
+
+
+def _log_join(op):
+    """Обратное направление тех же двух правил."""
+    inner = '*' if op == '+' else '/'
+
+    def build(eg, subst, eid):
+        a, b = subst['?a'], subst['?b']
+        if not (eg.positive(a) and eg.positive(b)):
+            return None
+        return eg.add_node(('log', eg.add_node((inner, a, b))))
+    return build
+
+
+RULES += [
+    (('*', ('sqrt', '?a'), ('sqrt', '?a')), _sqrt_square),
+    (('sqrt', ('*', '?a', '?b')), _sqrt_split),
+    (('*', ('sqrt', '?a'), ('sqrt', '?b')), _sqrt_join),
+    (('log', ('*', '?a', '?b')), _log_split('+')),
+    (('+', ('log', '?a'), ('log', '?b')), _log_join('+')),
+    (('log', ('/', '?a', '?b')), _log_split('-')),
+    (('-', ('log', '?a'), ('log', '?b')), _log_join('-')),
 ]

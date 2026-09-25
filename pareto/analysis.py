@@ -72,7 +72,16 @@ def iv_sqrt(a):
 
 
 def iv_exp(a):
-    return (math.exp(min(a[0], 700.0)), math.exp(min(a[1], 700.0)))
+    """Переполнение — это бесконечность, а не обрезанный максимум.
+
+    ⛔ Здесь стояло min(arg, 700): аргумент молча зажимался, интервал выходил
+    заниженным, и граница ошибки вместе с ним. Фаззинг 25.09.2026 поймал это на
+    exp(y) при y ∈ [549, 702]: граница 3.4e288 при реальной ошибке 8.1e288.
+    Верхний предел double для exp — около 709.78, дальше честная бесконечность.
+    """
+    if a[1] > 709.78:
+        return (math.exp(a[0]) if a[0] <= 709.78 else INF, INF)
+    return (math.exp(a[0]), math.exp(a[1]))
 
 
 def iv_log(a):
@@ -82,7 +91,10 @@ def iv_log(a):
 
 
 def iv_expm1(a):
-    return (math.expm1(min(a[0], 700.0)), math.expm1(min(a[1], 700.0)))
+    """То же ограничение, что и у exp: зажимать аргумент нельзя."""
+    if a[1] > 709.78:
+        return (math.expm1(a[0]) if a[0] <= 709.78 else INF, INF)
+    return (math.expm1(a[0]), math.expm1(a[1]))
 
 
 def iv_log1p(a):
@@ -124,13 +136,15 @@ def eval_interval(op, kids):
     raise ValueError(op)
 
 
-def propagate_error(op, kid_ivs, kid_errs, out_iv):
+def propagate_error(op, kid_ivs, kid_errs, out_iv, round_scale=1.0):
     """Верхняя граница АБСОЛЮТНОЙ ошибки результата.
 
     Модель стандартная: каждая операция в binary64 даёт относительную
     погрешность не больше U, плюс переносятся ошибки аргументов.
     """
-    round_off = U * iv_abs_max(out_iv)
+    # round_scale=0 означает «округление этой операции скомпенсировано»: ошибки
+    # аргументов при этом переносятся как обычно, потому что компенсация их не трогает
+    round_off = round_scale * U * iv_abs_max(out_iv)
     if op in ('+', '-'):
         return kid_errs[0] + kid_errs[1] + round_off
     if op == 'neg':
@@ -165,7 +179,10 @@ def propagate_error(op, kid_ivs, kid_errs, out_iv):
     if op == 'expm1':
         # производная expm1 это exp(x); на домене её максимум равен 1 + max|expm1|
         a = kid_ivs[0]
-        slope = math.exp(min(iv_abs_max(a), 700.0))
+        top = iv_abs_max(a)
+        if top > 709.78:
+            return INF
+        slope = math.exp(top)
         return slope * kid_errs[0] + round_off
     if op == 'log1p':
         # производная 1/(1+x); знаменатель берём по наименьшему |1+x| на домене
@@ -255,6 +272,29 @@ def cse_work(tree):
     return total
 
 
+def partial_cost(tree, domain, depth):
+    """Как tree_cost, но на верхних `depth` уровнях округление считается снятым.
+
+    Нужно компенсированным формам: они убирают погрешность собственных операций,
+    но не трогают то, что им подали на вход.
+    """
+    op = tree[0]
+    if op == 'num':
+        v = float(tree[1])
+        return 0.0, 0.0, (v, v), 0.0, 0.0
+    if op == 'var':
+        return 0.0, 0.0, domain[tree[1]], 0.0, 0.0
+    if depth <= 0 or op in ('approx', 'eft'):
+        return tree_cost(tree, domain)
+    kids = [partial_cost(k, domain, depth - 1) for k in tree[1:]]
+    ivs = [k[2] for k in kids]
+    out_iv = eval_interval(op, ivs)
+    err = propagate_error(op, ivs, [k[1] for k in kids], out_iv, round_scale=0.0)
+    work = COST[op] + sum(k[3] for k in kids)
+    lat = COST[op] + max(k[4] for k in kids)
+    return work + lat, err, out_iv, work, lat
+
+
 def tree_cost(tree, domain):
     """(стоимость, граница абсолютной ошибки, интервал, работа, критический путь)."""
     op = tree[0]
@@ -264,24 +304,27 @@ def tree_cost(tree, domain):
     if op == 'var':
         return 0.0, 0.0, domain[tree[1]], 0.0, 0.0
     if op == 'eft':
-        # Компенсированная форма. Ошибка таких схем имеет порядок u², то есть
-        # практически всё, что остаётся, — одно финальное округление. Берём два
-        # ulp результата: с запасом, но без обмана, и это проверяется замером.
+        # Компенсированная форма. Схема снимает округление ТОЛЬКО тех операций, из
+        # которых она построена, — глубина указана самим генератором. Всё, что ниже,
+        # считается обычным способом: компенсация деления не уточняет exp, поданный
+        # ей на вход. Фаззинг ловит обе крайности — и завышенную границу, и лживую.
         inner = tree[1]
-        iv = tree_cost(tree[2] if len(tree) > 2 else inner, domain)[2]
-        # Стоимость считаем с устранением общих подвыражений: компенсированные
-        # схемы по построению переиспользуют промежуточные величины (сумму, её
-        # ошибку, произведение), и любой компилятор вычислит их один раз. Считать
-        # каждое вхождение заново значит завысить цену впятеро и выкинуть точку
-        # с фронта ни за что.
+        orig = tree[2] if len(tree) > 2 else inner
+        depth = tree[3] if len(tree) > 3 else 1
+        _, args_err, iv, _, _ = partial_cost(orig, domain, depth)
+        # Остаточное округление считается не от результата, а от НАИБОЛЬШЕЙ
+        # промежуточной величины схемы. При сокращении близких чисел промежуточные
+        # значения на порядки больше ответа, и ulp от результата занижает границу —
+        # фаззинг ловил это на выражениях вида (y*(x*y)) + (y*y).
+        scale = iv_abs_max(iv)
+        for kid in orig[1:]:
+            try:
+                scale = max(scale, iv_abs_max(tree_cost(kid, domain)[2]))
+            except (ValueError, ZeroDivisionError, OverflowError, KeyError):
+                return INF, INF, iv, 0.0, 0.0
         work = cse_work(inner)
         _, _, _, _, lat = tree_cost(inner, domain)
-        # Компенсированная схема снимает ошибку промежуточных шагов до порядка u²,
-        # и остаётся по сути одно финальное округление. Берём 1.05 ulp: половина
-        # ulp от округления плюс запас на члены второго порядка. Число не с
-        # потолка — оно проверяется замером в tests/test_bound.py и в отчёте по
-        # плотности: если схема даст больше, тест упадёт.
-        return work + lat, 1.05 * U * iv_abs_max(iv), iv, work, lat
+        return work + lat, args_err + 2.0 * U * scale, iv, work, lat
     if op == 'approx':
         # ('approx', дерево, остаток) — приближение с собственной погрешностью метода.
         # Нужен, чтобы разложить ПОДвыражение в ряд и честно протащить остаток наружу
