@@ -127,9 +127,12 @@ jobs:
 
       - name: head-to-head on FPBench
         if: always()
+        timeout-minutes: 90
         env:
           FPTAYLOR_JS: tools/fptaylor_js
           DAISY_HOME: ${{ github.workspace }}/../daisy
+          DAISY_TIMEOUT: '180'
+          PARETO_SPLIT_BOXES: '64'
         run: python pareto/run_rivals.py
 
       - name: publish raw numbers

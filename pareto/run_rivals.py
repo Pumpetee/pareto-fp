@@ -219,7 +219,7 @@ def fptaylor_bound(name, tree, domain, timeout=900):
 DAISY_RE = re.compile(r'Absolute error:\s*([0-9.eE+-]+)')
 
 
-def daisy_bound(name, tree, domain, timeout=900):
+def daisy_bound(name, tree, domain, timeout=int(__import__('os').environ.get('DAISY_TIMEOUT', 180))):
     """Граница абсолютной ошибки по Daisy (анализ по умолчанию: интервалы + аффинная ошибка)."""
     home = os.environ.get('DAISY_HOME')
     if not home:
