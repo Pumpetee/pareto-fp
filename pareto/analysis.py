@@ -386,6 +386,126 @@ def tree_cost(tree, domain):
     return work + lat, err, out_iv, work, lat
 
 
+# ---------- ветвление по домену ----------
+#
+# Здесь мы проигрывали FPTaylor на всех девяти задачах FPBench, а на турбинах —
+# в 14 раз. Причина не в модели ошибки, а в том, что коэффициенты оценивались
+# интервалами СРАЗУ НА ВСЁМ домене: на широком прямоугольнике интервальная
+# арифметика переоценивает величины на порядки. FPTaylor максимизирует остаток
+# численно, поэтому и выигрывает.
+#
+# Ответ простой и строго корректный: разбить домен на части, посчитать границу на
+# каждой и взять максимум. Это законно, потому что максимум ошибки на объединении
+# равен максимуму из максимумов по частям, а интервальная арифметика монотонна по
+# вложению — на более узком домене граница не может вырасти. Значит разбиение
+# либо улучшает оценку, либо оставляет её прежней, и никогда не делает её ложной.
+#
+# Разбиение адаптивное: делим ту коробку, которая сейчас даёт худшую границу, и ту
+# переменную в ней, у которой шире относительный разброс. Тратить деления на
+# спокойные участки домена бессмысленно — вся ошибка сидит в одном углу.
+
+SPLIT_BOXES = int(__import__('os').environ.get('PARETO_SPLIT_BOXES', 64))
+
+
+def _rel_width(lo, hi):
+    w = hi - lo
+    if not math.isfinite(w) or w <= 0.0:
+        return -1.0
+    scale = max(abs(lo), abs(hi), 1e-300)
+    return w / scale
+
+
+def _widest_var(domain):
+    best, bw = None, 0.0
+    for k, (lo, hi) in domain.items():
+        r = _rel_width(lo, hi)
+        if r > bw:
+            bw, best = r, k
+    return best
+
+
+def _halve(domain, var):
+    lo, hi = domain[var]
+    mid = lo + (hi - lo) / 2.0
+    if not (lo < mid < hi):          # домен уже неделим в double
+        return None
+    a = dict(domain); a[var] = (lo, mid)
+    b = dict(domain); b[var] = (mid, hi)
+    return a, b
+
+
+def tree_cost_refined(tree, domain, boxes=None):
+    """То же, что tree_cost, но граница уточнена ветвлением по домену.
+
+    Стоимость, работа и критический путь от домена не зависят — берём из общего
+    прогона. Возвращаемый интервал — оболочка по частям.
+    """
+    base = tree_cost(tree, domain)
+    n_boxes = SPLIT_BOXES if boxes is None else boxes
+    if n_boxes <= 1 or not domain or not math.isfinite(base[1]) or base[1] == 0.0:
+        return base
+
+    work = [(base[1], domain, base[2])]
+    made = 1
+    while made < n_boxes:
+        i = max(range(len(work)), key=lambda k: work[k][0])
+        err_i, dom_i, _ = work[i]
+        if not math.isfinite(err_i):
+            break
+        v = _widest_var(dom_i)
+        if v is None:
+            break
+        halves = _halve(dom_i, v)
+        if halves is None:
+            break
+        try:
+            r1 = tree_cost(tree, halves[0])
+            r2 = tree_cost(tree, halves[1])
+        except (ValueError, ZeroDivisionError, OverflowError, KeyError):
+            break
+        work[i] = (r1[1], halves[0], r1[2])
+        work.append((r2[1], halves[1], r2[2]))
+        made += 1
+
+    err = max(w[0] for w in work)
+    lo = min(w[2][0] for w in work)
+    hi = max(w[2][1] for w in work)
+    # Подстраховка: если из-за tighten или модели рядов где-то нарушилась
+    # монотонность, берём лучшее из двух — обе оценки сами по себе состоятельны.
+    return base[0], min(err, base[1]), (lo, hi), base[3], base[4]
+
+
+def refine_front(front, domain, boxes=None):
+    """Уточняет границы у готовых точек фронта.
+
+    Поиск идёт на дешёвой оценке — иначе каждая из тысяч вариаций платила бы за
+    ветвление. Ветвление применяется один раз к тем восьми формам, которые реально
+    поедут в отчёт. Порядок точек сохраняется.
+    """
+    out = []
+    for pt in front:
+        cost, err, tree = pt[0], pt[1], pt[2]
+        try:
+            # Во фронте лежит ГОТОВАЯ к печати формула, и для разложений в ряд это
+            # уже очищенный многочлен — остаток метода в нём не виден, он был учтён
+            # при анализе обёрнутого дерева. Пересчёт по такой формуле даёт границу
+            # без остатка, то есть враньё в тысячи раз: на exp(-0.723) вышло
+            # 1.078e-16 против реальных 5.307e-02. Поэтому уточняем только те точки,
+            # где пересчёт воспроизводит исходную границу, — значит дерево то самое.
+            plain = tree_cost(tree, domain)[1]
+            same = (math.isfinite(plain) and math.isfinite(err)
+                    and abs(plain - err) <= 1e-12 * max(abs(plain), abs(err), 1e-300))
+            err2 = tree_cost_refined(tree, domain, boxes=boxes)[1] if same else err
+        except (ValueError, ZeroDivisionError, OverflowError, KeyError):
+            err2 = err
+        out.append((cost, err2) + tuple(pt[2:]))
+    # Порядок НЕ трогаем. Пересортировка здесь стоила часа разбора 26.09.2026:
+    # вызывающий код держит формы и границы двумя параллельными списками, и
+    # перестановка тихо сдвинула границы относительно форм — фаззинг показал
+    # тринадцать «нарушений», которых на деле не было.
+    return out
+
+
 # ---------- извлечение фронта Парето ----------
 def _dominated(cand, front):
     for p in front:

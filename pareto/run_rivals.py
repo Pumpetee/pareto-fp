@@ -47,7 +47,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from pareto.analysis import pareto_extract, tree_cost
+from pareto.analysis import pareto_extract, refine_front, tree_cost_refined
 from pareto.codegen import to_text
 from pareto.egraph import EGraph
 from pareto.fpbench_cases import FPBENCH_CASES
@@ -320,12 +320,13 @@ def main(argv=None):
         rng = random.Random(SEED)
 
         t0 = time.perf_counter()
-        _, base_bound, _, _, _ = tree_cost(case['expr'], domain)
+        _, base_bound, _, _, _ = tree_cost_refined(case['expr'], domain)
         eg = EGraph()
         root = eg.add_expr(case['expr'])
         eg.saturate(RULES, iters=case.get('iters', 6),
                     node_limit=case.get('node_limit', 20000), domain=domain)
         front, _ = pareto_extract(eg, root, domain, keep=8)
+        front = refine_front(front, domain)
         search_sec = time.perf_counter() - t0
 
         finite = [p for p in front if p[1] is not None and math.isfinite(p[1])]

@@ -22,7 +22,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from pareto.analysis import pareto_extract, tree_cost
+from pareto.analysis import pareto_extract, refine_front, tree_cost, tree_cost_refined
 from pareto.codegen import to_text
 from pareto.egraph import EGraph
 from pareto.rules import RULES
@@ -116,9 +116,13 @@ class FuzzBound(unittest.TestCase):
                 eg.saturate(RULES, iters=4, node_limit=4000, domain=domain)
                 front, _ = pareto_extract(eg, root, domain, keep=5)
                 forms += [p[2] for p in front]
-                bounds = [base_bound] + [p[1] for p in front]
+                # Проверяем УТОЧНЁННЫЕ границы, а не только дешёвые: ветвление по
+                # домену — это оптимизация, и звучит она безопасно ровно до того
+                # момента, когда из-за неё напечатается граница ниже настоящей ошибки.
+                front = refine_front(front, domain)
+                bounds = [tree_cost_refined(expr, domain)[1]] + [p[1] for p in front]
             except Exception:
-                bounds = [base_bound]
+                bounds = [tree_cost_refined(expr, domain)[1]]
 
             for tree, bound in zip(forms, bounds):
                 if not math.isfinite(bound):
