@@ -26,6 +26,30 @@ jobs:
       - name: smoke run of the CLI
         run: python -m pareto.cli "x*x - y*y" --domain x=1..2 --domain y=1..2
 
+      # Каждый пример из examples/ обязан считаться на чистой машине. Пример,
+      # который не запускается, — это не документация, а обещание, и он отваливает
+      # первого же человека, который решил проверить нас своими руками.
+      - name: every example in examples/ must run
+        shell: bash
+        run: |
+          set -e
+          python -m pareto.cli --file examples/rosa_turbine.c --list
+          for fn in turbine1 turbine2 turbine3; do
+            python -m pareto.cli --file examples/rosa_turbine.c --function $fn --time-budget 20
+          done
+          for fn in safe_diff_sqrt expm1_guard jumpy; do
+            python -m pareto.cli --file examples/branch_sqrt.c --function $fn --time-budget 20
+          done
+          python -m pareto.cli --file examples/mixed_precision.c --function energy --time-budget 20
+          python -m pareto.cli --file examples/newton_loop.c --function sqrt_newton --time-budget 20
+      - name: mixed precision and the format tuner
+        run: |
+          python -m pareto.cli "0.5*m*v*v + m*9.81*h" --domain m=1..2 --domain v=0..30 --domain h=0..100 --target 1e-3
+      - name: the ready-to-run single file must build and work
+        run: |
+          python tools/build_release.py
+          python dist/pareto-fp.pyz --file examples/rosa_turbine.c --function turbine1 --time-budget 20
+
   benchmark:
     # Timings need clang, so this is a separate job. Two architectures on purpose:
     # ubuntu is x86-64, macos-latest is arm64. A speed ratio that only exists on
@@ -49,6 +73,14 @@ jobs:
         run: python pareto/run_fairbench.py
       - name: how loose the proven bound is
         run: python pareto/run_tightness.py
+      # Таблица по FPBench раньше считалась только у автора на ноутбуке, а в README
+      # стояла как факт. Теперь её пересчитывает чистая машина, и часы на задачу
+      # стоят затем, чтобы прогон был предсказуем по времени: срезанная стадия
+      # делает границу шире, но не делает её неверной.
+      - name: proven bounds on the FPBench rosa cases
+        env:
+          PARETO_TIME_BUDGET: '60'
+        run: python pareto/run_fpbench.py
       - name: head-to-head on Herbie's own metric
         run: python pareto/run_herbie_metric.py
       - name: publish raw numbers
@@ -60,6 +92,8 @@ jobs:
             bench/fair_results.json
             bench/tightness_report.txt
             bench/herbie_metric_report.txt
+            bench/fpbench_report.txt
+            bench/fpbench_results.json
 
   rivals:
     # The comparison against FPTaylor and Daisy, re-run on a clean machine. Both tools are

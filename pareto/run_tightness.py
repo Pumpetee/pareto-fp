@@ -34,7 +34,7 @@ from pareto.egraph import EGraph
 from pareto.parser import parse, variables
 from pareto.rules import RULES
 from pareto.run import CASES, exact
-from pareto.run_herbie_metric import eval_float
+from pareto.evalfp import eval_float
 
 ROOT = Path(__file__).resolve().parent.parent
 BENCH = ROOT / 'bench'

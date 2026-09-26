@@ -32,7 +32,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from pareto.codegen import to_text
 from pareto.parser import parse
-from pareto.fma_compat import fma as exact_fma
+from pareto.evalfp import eval_float
 from pareto.run import CASES, exact
 from pareto.hard_cases import HARD_CASES
 
@@ -66,42 +66,6 @@ def _ordered(x):
     return bits
 
 
-def eval_float(tree, env):
-    op = tree[0]
-    if op in ('approx', 'eft'):
-        return eval_float(tree[1], env)
-    if op == 'num':
-        return float(tree[1])
-    if op == 'var':
-        return float(env[tree[1]])
-    if op == 'neg':
-        return -eval_float(tree[1], env)
-    if op == 'sqrt':
-        return math.sqrt(eval_float(tree[1], env))
-    if op == 'exp':
-        return math.exp(eval_float(tree[1], env))
-    if op == 'log':
-        return math.log(eval_float(tree[1], env))
-    if op == 'expm1':
-        return math.expm1(eval_float(tree[1], env))
-    if op == 'log1p':
-        return math.log1p(eval_float(tree[1], env))
-    a = eval_float(tree[1], env)
-    b = eval_float(tree[2], env)
-    if op == 'hypot':
-        return math.hypot(a, b)
-    if op == '+':
-        return a + b
-    if op == '-':
-        return a - b
-    if op == '*':
-        return a * b
-    if op == '/':
-        return a / b
-    if op == 'fma':
-        c = eval_float(tree[3], env)
-        return exact_fma(a, b, c)
-    raise AssertionError('unknown node: ' + op)
 
 
 def bits_of_error(form, case, points):

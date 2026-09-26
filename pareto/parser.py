@@ -8,9 +8,14 @@
     parse('sqrt(x+1) - sqrt(x)')  ->  ('-', ('sqrt', ('+', ('var','x'), ('num',1.0))), ('sqrt', ('var','x')))
 
 Поддержано: + - * / , унарный минус, скобки, степень с целым показателем
-(x^3 и x**3 разворачиваются в умножения), функции sqrt, exp, log.
+(x^3 и x**3 разворачиваются в умножения), функции sqrt, exp, log, а также
+округление к узкому формату: f32(...) и f16(...). Последнее нужно, чтобы формулу
+со смешанной точностью можно было и напечатать, и прочитать обратно — иначе
+собственный вывод инструмента не проходит через его же вход.
 """
 from __future__ import annotations
+
+from pareto.precision import ROUND_OPS
 
 FUNCS = ('sqrt', 'exp', 'log', 'expm1', 'log1p')
 
@@ -152,9 +157,14 @@ class _P:
                     c = self.expr()
                     self.take('op', ')')
                     return ('fma', a, b, c)
+                if v in ROUND_OPS:
+                    self.take('op', '(')
+                    arg = self.expr()
+                    self.take('op', ')')
+                    return (v, arg)
                 if v not in FUNCS:
                     raise ParseError('function {} is not supported, available: {}'.format(
-                        v, ', '.join(FUNCS + ('fma',))))
+                        v, ', '.join(FUNCS + ('fma',) + tuple(ROUND_OPS))))
                 self.take('op', '(')
                 arg = self.expr()
                 self.take('op', ')')

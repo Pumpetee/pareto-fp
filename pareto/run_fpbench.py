@@ -20,13 +20,14 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from pareto import budget
 from pareto.analysis import pareto_extract, refine_front, tree_cost_refined
 from pareto.codegen import to_text
 from pareto.egraph import EGraph
 from pareto.fpbench_cases import FPBENCH_CASES
 from pareto.rules import RULES
-from pareto.run import exact
-from pareto.run_herbie_metric import eval_float
+from pareto.exactref import exact
+from pareto.evalfp import eval_float
 
 ROOT = Path(__file__).resolve().parent.parent
 BENCH = ROOT / 'bench'
@@ -61,14 +62,29 @@ def main(names=None):
         rng = random.Random(SEED)
         domain = case['domain']
 
+        # Часы ставятся НА КАЖДУЮ задачу отдельно, а не на прогон: иначе первая
+        # тяжёлая съела бы бюджет и остальные получили бы границы, посчитанные без
+        # уточнения, — таблица стала бы несравнимой сама с собой. В CI переменная
+        # задана, локально её обычно нет и прогон идёт до конца.
+        budget.set_budget(budget.default_seconds())
         t0 = time.perf_counter()
         base_cost, base_bound, _, _, _ = tree_cost_refined(case['expr'], domain)
         eg = EGraph()
         root = eg.add_expr(case['expr'])
         eg.saturate(RULES, iters=case.get('iters', 6),
-                    node_limit=case.get('node_limit', 20000), domain=domain)
+                    node_limit=case.get("node_limit", 20000), domain=domain,
+                    time_budget=None if budget.remaining() == float("inf")
+                    else max(0.5, budget.remaining() * 0.5))
         front, _ = pareto_extract(eg, root, domain, keep=8)
         front = refine_front(front, domain)
+        # Исходная запись — тоже кандидат, и это не формальность. С часами на
+        # задачу уточнение границ у найденных форм может быть срезано, а у исходной
+        # записи оно уже посчитано, — и тогда «лучшая» форма выходит с границей
+        # ХУЖЕ исходной. Ровно это и случилось на carbonGas: 6.3e-08 против
+        # 5.7e-09 у того, что человек написал сам. Инструмент, который в такой
+        # ситуации печатает свою находку, врёт о своей пользе; правильный ответ —
+        # «лучше того, что у тебя написано, доказать не удалось».
+        front = list(front) + [(base_cost, base_bound, case['expr'], 0.0, 0.0)]
         elapsed = time.perf_counter() - t0
 
         best = min(front, key=lambda p: (p[1], p[0])) if front else None

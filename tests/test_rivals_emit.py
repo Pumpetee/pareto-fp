@@ -21,7 +21,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from pareto.parser import parse
-from pareto.run_herbie_metric import eval_float
+from pareto.evalfp import eval_float
 from pareto.run_rivals import shared_form, to_fptaylor, to_scala
 
 SEED = 20260925

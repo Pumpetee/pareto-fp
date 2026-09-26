@@ -16,6 +16,7 @@ U = 2.0 ** -53
 
 from pareto.analysis import (eval_interval, exact_op, half_ulp, iv_abs_max,
                              iv_abs_min, op_unit, tighten)
+from pareto.precision import ROUND_OPS, overflows
 from pareto.symbolic_error import ErrForm, node_key
 
 INF = float('inf')
@@ -66,6 +67,20 @@ def symbolic_error(tree, domain):
             _kid_errs.append(form.bound())
         except Exception:
             _kid_errs.append(float('inf'))
+    if op in ROUND_OPS:
+        # Округление к узкому формату: та же линейная форма, но улпа берётся в
+        # целевом формате и в точке «максимум модуля плюс накопленная ошибка».
+        # Символ привязан к записи поддерева, поэтому два одинаковых округления
+        # к float сокращаются в разности точно так же, как обычные.
+        fmt = ROUND_OPS[op]
+        if overflows(fmt, out_iv) or not math.isfinite(_kid_errs[0]):
+            return None, None
+        top = iv_abs_max(out_iv) + _kid_errs[0]
+        if top > fmt.max_finite:
+            return None, None
+        m = 0.0 if exact_op(tree, ivs, _kid_errs, out_iv) else fmt.half_ulp(top) / U
+        return errs[0].with_rounding(key, m), out_iv
+
     if exact_op(tree, ivs, _kid_errs, out_iv):
         mag = 0.0
     else:

@@ -26,8 +26,8 @@ from pareto.analysis import pareto_extract, refine_front, tree_cost, tree_cost_r
 from pareto.codegen import to_text
 from pareto.egraph import EGraph
 from pareto.rules import RULES
-from pareto.run import exact_stable
-from pareto.run_herbie_metric import eval_float
+from pareto.exactref import exact_stable
+from pareto.evalfp import eval_float
 
 getcontext().prec = 60
 

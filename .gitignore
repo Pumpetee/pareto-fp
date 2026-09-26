@@ -24,3 +24,6 @@ Thumbs.db
 # third-party build fetched by tools/README.md, not ours to redistribute
 tools/fptaylor_js/fptaylor.js
 tools/fptaylor_js/default_config.txt
+
+# собранные артефакты релиза: их делает CI по тегу, в репозитории им не место
+dist/

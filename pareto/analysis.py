@@ -11,6 +11,9 @@ from __future__ import annotations
 import math
 import os
 
+from pareto.precision import (FLOAT64, ROUND_OPS, has_narrow, overflows,
+                              round_interval)
+
 U = 2.0 ** -53          # машинный эпсилон / 2 для binary64
 
 # Сколько U стоит округление самой операции.
@@ -35,6 +38,12 @@ OP_ULP = {
     'exp': LIBM_ULP, 'log': LIBM_ULP, 'expm1': LIBM_ULP,
     'log1p': LIBM_ULP, 'hypot': LIBM_ULP,
 }
+
+# Округление к более узкому формату IEEE-754 требует корректного, то есть
+# половину улпы ЦЕЛЕВОГО формата. Улпа здесь другая, поэтому в propagate_error
+# такие узлы обрабатываются отдельно, а не через half_ulp для binary64.
+for _op in ROUND_OPS:
+    OP_ULP[_op] = 1.0
 
 
 def half_ulp(mag):
@@ -83,6 +92,22 @@ COST = {
     # Стоят примерно как их обычные собратья: та же реализация плюс поправочный шаг.
     'expm1': 22.0, 'log1p': 22.0, 'hypot': 12.0,
 }
+
+# Узел округления к узкому формату стоит НОЛЬ, и это сознательное решение, а не
+# недоделка. В настоящем коде `float a, b; a*b` компилируется в одну инструкцию
+# mulss — отдельной конверсии там нет вовсе, она есть только на границе между
+# double и float. Приписать такому узлу цену значило бы систематически штрафовать
+# код на float, а приписать ОТРИЦАТЕЛЬНУЮ цену (мол, float быстрее) значило бы
+# заявить ускорение, которого на скалярном x86 нет: латентность mulss и mulsd
+# одинакова. Выигрыш узкого формата живёт в пропускной способности памяти и в
+# ширине вектора, а наша модель ни того, ни другого не считает.
+#
+# Поэтому по умолчанию модель НЕ обещает ускорения от узкой точности, и вопрос
+# «а можно ли здесь обойтись float» решается не фронтом, а подбором точности под
+# заданную границу ошибки (pareto/tune.py). Кому известен свой коэффициент —
+# PARETO_ROUND_COST, и это будет его допущение, а не наш замер.
+for _op in ROUND_OPS:
+    COST[_op] = float(os.environ.get('PARETO_ROUND_COST', 0.0))
 
 
 # ---------- интервальная арифметика ----------
@@ -171,7 +196,45 @@ def iv_abs_min(a):
     return min(abs(a[0]), abs(a[1]))
 
 
+def widen(iv, ulps=2):
+    """Раздвинуть интервал наружу на несколько шагов сетки.
+
+    ⛔ Это заплатка на дыру, которая жила в проекте с первого дня и была найдена
+    26.09.2026 разбором ветвлений. Интервалы считались обычной арифметикой double,
+    без направленного округления. То есть КАЖДАЯ операция над границами интервала
+    сама округлялась — и могла округлиться ВНУТРЬ, сделав интервал уже настоящего.
+    А из интервала берётся величина, на которую умножается ошибка: интервал уже
+    настоящего означает границу ниже настоящей, то есть не границу.
+
+    На чём поймано. Условие `(x + 1e16) - 1e16 > 0` при x из [0.1, 1.9]: истинное
+    значение это x, то есть строго положительное. Но `1e16 + 0.1` в double равно
+    ровно `1e16`, и после вычитания интервал схлопывался в точку (0, 0). Анализ
+    объявил ветку `> 0` НЕДОСТИЖИМОЙ, хотя она достижима всегда. Ошибка была
+    видна как неверный вывод о программе; в границе она сидела молча.
+
+    Правильное лекарство — направленное округление, то есть считать нижнюю границу
+    с округлением вниз, верхнюю с округлением вверх. В Python режим округления FPU
+    не переключается, поэтому делаем эквивалентное: считаем как есть и раздвигаем
+    результат на шаг сетки в каждую сторону. Одна операция double ошибается не
+    больше чем на половину улпы, поэтому одного шага достаточно; берём два, чтобы
+    покрыть и библиотечные функции, которым стандарт корректного округления не
+    обещает.
+    """
+    lo, hi = iv
+    if math.isnan(lo) or math.isnan(hi):
+        return iv
+    for _ in range(ulps):
+        lo = math.nextafter(lo, -INF)
+        hi = math.nextafter(hi, INF)
+    return (lo, hi)
+
+
 def eval_interval(op, kids):
+    return widen(_eval_interval_raw(op, kids))
+
+
+def _eval_interval_raw(op, kids):
+    if op in ROUND_OPS: return round_interval(ROUND_OPS[op], kids[0])
     if op == '+': return iv_add(*kids)
     if op == '-': return iv_sub(*kids)
     if op == '*': return iv_mul(*kids)
@@ -221,6 +284,18 @@ def exact_op(tree, kid_ivs, kid_errs, out_iv):
     реально окажутся в регистрах.
     """
     op = tree[0]
+    if op in ROUND_OPS:
+        # Повторное округление к тому же или более широкому формату ничего не
+        # меняет: значение уже лежит на сетке. В коде, прочитанном из файла, такие
+        # пары появляются постоянно — `float t = (float)(a*b);` рядом с
+        # присваиванием во float-переменную.
+        kid = tree[1]
+        if isinstance(kid, tuple) and kid[0] in ROUND_OPS:
+            inner, outer = ROUND_OPS[kid[0]], ROUND_OPS[op]
+            if inner.mant_bits <= outer.mant_bits and inner.min_normal >= outer.min_normal:
+                return True
+        return False
+
     if not _normal_range(out_iv):
         return False
 
@@ -272,6 +347,20 @@ def propagate_error(op, kid_ivs, kid_errs, out_iv, round_scale=1.0):
     Модель стандартная: каждая операция в binary64 даёт относительную
     погрешность не больше U, плюс переносятся ошибки аргументов.
     """
+    if op in ROUND_OPS:
+        # Округление к узкому формату: ошибка аргумента переносится один в один
+        # (функция не растягивает — она монотонна с наклоном ~1), плюс половина
+        # улпы ЦЕЛЕВОГО формата. Улпу берём в точке «максимум модуля плюс уже
+        # накопленная ошибка»: в регистре лежит вычисленное значение, а не идеальное,
+        # и оно может оказаться в следующем двоичном порядке, где улпа вдвое больше.
+        fmt = ROUND_OPS[op]
+        if overflows(fmt, out_iv) or not math.isfinite(kid_errs[0]):
+            return INF
+        mag = iv_abs_max(out_iv) + kid_errs[0]
+        if mag > fmt.max_finite:
+            return INF
+        return kid_errs[0] + round_scale * fmt.half_ulp(mag)
+
     # round_scale=0 означает «округление этой операции скомпенсировано»: ошибки
     # аргументов при этом переносятся как обычно, потому что компенсация их не трогает
     round_off = round_scale * op_unit(op) * half_ulp(iv_abs_max(out_iv))
@@ -457,6 +546,12 @@ def tree_cost(tree, domain):
         inner = tree[1]
         orig = tree[2] if len(tree) > 2 else inner
         depth = tree[3] if len(tree) > 3 else 1
+        if has_narrow(inner) or has_narrow(orig):
+            # Компенсированные схемы выведены для ОДНОГО формата: TwoSum точен
+            # ровно потому, что остаток представим в том же binary64. С округлением
+            # к float внутри это неверно, а partial_cost вдобавок снял бы с такого
+            # узла плату за округление. Молча выдавать здесь границу нельзя.
+            return INF, INF, (-INF, INF), 0.0, 0.0
         _, args_err, iv, _, _ = partial_cost(orig, domain, depth)
         # Остаточное округление считается не от результата, а от НАИБОЛЬШЕЙ
         # промежуточной величины схемы. При сокращении близких чисел промежуточные
@@ -570,9 +665,12 @@ def tree_cost_refined(tree, domain, boxes=None):
     if n_boxes <= 1 or not domain or not math.isfinite(base_err) or base_err == 0.0:
         return base[0], base_err, base[2], base[3], base[4]
 
+    from pareto import budget
     work = [(base_err, domain, base[2])]
     made = 1
     while made < n_boxes:
+        if budget.expired('domain branching'):
+            break
         i = max(range(len(work)), key=lambda k: work[k][0])
         err_i, dom_i, _ = work[i]
         if not math.isfinite(err_i):
@@ -652,8 +750,11 @@ def sqrt_square_candidates(front, domain, boxes=None):
     а решает, брать ли его, обычное сравнение границ: кандидат попадает в ответ
     только если его ДОКАЗАННАЯ граница лучше.
     """
+    from pareto import budget
     out = list(front)
     for pt in front:
+        if budget.expired('sqrt-square candidates'):
+            break
         cost, err, tree = pt[0], pt[1], pt[2]
         try:
             iv = tree_cost(tree, domain)[2]
@@ -678,8 +779,12 @@ def refine_front(front, domain, boxes=None):
     ветвление. Ветвление применяется один раз к тем восьми формам, которые реально
     поедут в отчёт. Порядок точек сохраняется.
     """
+    from pareto import budget
     out = []
     for pt in front:
+        if budget.expired('domain branching'):
+            out.append((pt[0], pt[1]) + tuple(pt[2:]))
+            continue
         cost, err, tree = pt[0], pt[1], pt[2]
         try:
             # Во фронте лежит ГОТОВАЯ к печати формула, и для разложений в ряд это
@@ -726,11 +831,23 @@ def _insert(front, cost, err, tree, keep, work=0.0, lat=0.0):
 
 def pareto_extract(eg, root, domain, keep=8, rounds=10, series=True):
     """Для каждого класса — недоминируемые пары (стоимость, ошибка) с деревом."""
+    from pareto import budget
     iv = class_intervals(eg, domain)
     front = {}
+    stop = False
     for _ in range(rounds):
         changed = False
-        for eid in list(eg.classes):
+        # Часы можно проверять и посреди круга, и это безопасно: фронт класса —
+        # это только СПИСОК КАНДИДАТОВ, а границу каждого извлечённого дерева всё
+        # равно пересчитывает tree_cost честно и целиком. Брошенный на середине
+        # круг означает меньше кандидатов, а не неверные числа. Если кандидатов не
+        # осталось вовсе, вызывающая сторона вернётся к исходной записи.
+        if stop or budget.expired('Pareto extraction'):
+            break
+        for n, eid in enumerate(list(eg.classes)):
+            if n % 64 == 63 and budget.expired('Pareto extraction'):
+                stop = True
+                break
             r = eg.uf.find(eid)
             cur = front.get(r, [])
             for node in eg.classes.get(r, ()):
@@ -783,6 +900,8 @@ def pareto_extract(eg, root, domain, keep=8, rounds=10, series=True):
     # ним бессмысленен. Дерево уже собрано, поэтому просто считаем по нему честно.
     out = []
     for cost, err, tree, work, lat in front.get(eg.uf.find(root), []):
+        if budget.expired('recheck of the extracted forms') and out:
+            break
         try:
             c2, e2, _, w2, l2 = tree_cost(tree, domain)
         except (ValueError, ZeroDivisionError, OverflowError):
@@ -804,6 +923,13 @@ def pareto_extract(eg, root, domain, keep=8, rounds=10, series=True):
     # Приближения рядом Тейлора добавляются кандидатами, а не сливаются с e-графом:
     # e-граф хранит тождества, а ряд тождеством не является. Их граница уже включает
     # остаточный член, поэтому сравнивать их с точными формами можно напрямую.
+    # Разложения в ряд и компенсированные схемы выведены для binary64. Появился в
+    # дереве узел округления к узкому формату — такие кандидаты не предлагаются вовсе.
+    if any(has_narrow(p[2]) for p in out):
+        series = False
+    from pareto import budget
+    if budget.expired('series and compensated candidates'):
+        series = False
     if out and series:
         from pareto.taylor import series_candidates
         # пробуем КАЖДУЮ форму фронта: разложение умеет раскрывать верхний узел, а
@@ -812,6 +938,8 @@ def pareto_extract(eg, root, domain, keep=8, rounds=10, series=True):
         from pareto.taylor import rewrite_candidates
         extra = []
         for _, _, seed, _, _ in out:
+            if budget.expired('series expansion'):
+                break
             extra.extend(series_candidates(seed, domain))
         # Разложение подвыражений заметно дороже: внутри своя саторация на каждого
         # кандидата. Поэтому берём не весь фронт, а три опорные формы — самую дешёвую,
@@ -819,11 +947,15 @@ def pareto_extract(eg, root, domain, keep=8, rounds=10, series=True):
         # эквивалентных форм повторяется.
         from pareto.eft import eft_candidates
         for _, _, seed, _, _ in out:
+            if budget.expired('compensated schemes'):
+                break
             extra.extend(eft_candidates(seed, domain))
         ordered = sorted(out, key=lambda p: (p[0], p[1]))
         seeds = {id(ordered[0]): ordered[0], id(ordered[-1]): ordered[-1],
                  id(ordered[len(ordered) // 2]): ordered[len(ordered) // 2]}
         for _, _, seed, _, _ in seeds.values():
+            if budget.expired('series expansion of subexpressions'):
+                break
             extra.extend(rewrite_candidates(seed, domain))
         out.extend(extra)
 

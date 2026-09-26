@@ -53,8 +53,8 @@ from pareto.egraph import EGraph
 from pareto.fpbench_cases import FPBENCH_CASES
 from pareto.hard_cases import HARD_CASES
 from pareto.rules import RULES
-from pareto.run import exact
-from pareto.run_herbie_metric import eval_float
+from pareto.exactref import exact
+from pareto.evalfp import eval_float
 
 ROOT = Path(__file__).resolve().parent.parent
 BENCH = ROOT / 'bench'

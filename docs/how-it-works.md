@@ -87,7 +87,106 @@ Three things carry those results. `expm1`, `log1p` and `hypot` as first-class op
 
 The remaining loss is honest: on the quadratic formula he expands in the small parameter and then cancels the division symbolically, ending at `−c/b − ac²/b³`. We reach 0.51 bits from 47.14 by the same kind of expansion, but keep a common factor we cannot cancel — that needs a conditional rewrite rule, and conditional rules are where this project has already broken correctness once.
 
-## The bound once lied, and how that was found
+## A whole function, not one expression
+
+Real numeric code is not a single expression. It declares intermediate values, it
+guards the edge of a domain with an `if`, and it loops. Until the tool could read
+that, it could not be pointed at anyone's file — only at a formula copied out of
+one by hand.
+
+**Local variables are inlined.** A value computed once and used three times becomes
+three copies of the same subtree, and that is not a loss of information: identical
+subtrees get the same rounding symbol in the symbolic error form, so the model still
+sees one rounding rather than three. The cost model has always counted a shared
+subexpression once (`cse_work`), and the printed C now shares it too — the rewritten
+body comes out with `double t1 = ...` temporaries rather than one inlined monster.
+Those three places finally agree with each other.
+
+**Conditionals become paths.** Each path carries its set of decided comparisons and
+its own return expression. The bound is computed per path and the maximum is taken,
+which is legal because the maximum over a union is the maximum of the maxima. Each
+path is also *optimised separately*, over its own reachable region: the arithmetic
+that is best on `x > 1` is not the arithmetic that is best below it.
+
+Which boxes a path can reach is decided by splitting the domain and evaluating each
+comparison on each box. A box where a comparison comes out definitely false for this
+path is dropped; a box where it is undecided is kept, so the estimate stays an upper
+one.
+
+**The unstable test is the part that makes this hard.** A comparison is decided on
+the *computed* values, which carry rounding error. Where the two sides can be within
+that error of each other, the program is free to take either branch — and if it
+takes the wrong one, the error against the ideal value contains the whole **jump**
+between the branches. A bound that is the maximum over the branches is simply wrong
+on those inputs, and they are exactly the inputs a reviewer will try.
+
+So the reported bound is the sum of two terms: rounding, the maximum over reachable
+paths, plus the jump, the largest `|ideal of one branch − ideal of the other|` over
+the boxes where the test can flip. Two details matter:
+
+- the error of the *comparison* is the sum of the errors of its two sides, and
+  nothing more. Modelling it as the error of a subtraction adds a rounding that the
+  machine never performs — and with it, `x > 1` gets declared unstable, so a jump
+  that cannot happen lands in the bound;
+- when both branches compute the same expression the jump is exactly zero, and that
+  is checked structurally rather than estimated. An interval estimate of the
+  difference gives a small but non-zero number there, and a program with no
+  discontinuity would be charged for one.
+
+`tests/test_program_bound.py` does not assume a flip can happen, it makes one
+happen: the guard is `(x + 1e16) - 1e16 > 0`, which is `x > 0` in real arithmetic and
+a multiple of two in binary64, so for `x < 1` the machine really does take the other
+branch. The test first asserts the flip occurs and only then that the bound covers
+it. A previous attempt at that case — `x*x - y*y > 0` on neighbouring `x` and `y` —
+turned out to never flip, and that is worth knowing too: one ulp of step in `x`
+moves `x²` by about two ulps, which is more than the error of computing the squares.
+Our analysis still marks such a comparison unstable, out of caution.
+
+**Loops are unrolled** when the trip count is a constant, and refused out loud when
+it is not. Unrolling is the only sound way this method knows to handle a loop: after
+it the body is straight-line code and everything else applies without a single new
+axiom.
+
+## Mixed precision is a node in the tree, not a flag
+
+Rounding to a narrower format is an explicit unary node: `('f32', subtree)`. That
+choice buys three things at once.
+
+For the e-graph it is an ordinary operator that appears in no rewrite rule, so no
+rule ever moves anything across it, while the algebra *around* it keeps working.
+Rewriting stays correct because for the algebra `f32(x)` is just some real number,
+and an identity over real numbers holds for it.
+
+It expresses mixed precision without a new concept. `f32(x*y + z)` is a multiply and
+an add in binary64 with one rounding to binary32 at the end; `f32(f32(x*y) + z)` is a
+different program; both are trees.
+
+And it makes the central question a matter of where to put nodes. Here is the part
+worth being precise about: **rounding nodes are not part of the mathematics, they are
+part of the implementation.** An expression has an ideal real value, and it does not
+depend on the formats the intermediates were kept in. The bound in this project has
+always meant one thing — the distance from the printed program to that ideal value.
+So the e-graph is seeded with the expression *without* rounding nodes, and the format
+of the *result* is put back on the forms it finds, because the result format is a
+contract: a function declared to return `float` must be answered with a form that
+returns `float`. The inner roundings are the free choice, and usually the answer is
+to drop them — which is the oldest advice in numerical code, now with the factor it
+buys you attached.
+
+`--target` walks the other way: it narrows subexpressions bottom-up while the proven
+bound stays under a value you choose. The standard tools for tuning precision decide
+by sampling inputs; here the check is a proven bound over the whole range, so the
+answer is never "it was good enough on my tests".
+
+What is deliberately *not* claimed is a speedup. On scalar x86 `mulss` and `mulsd`
+have the same latency; the win of `float` is memory traffic and vector width, neither
+of which this cost model measures. A rounding node therefore costs zero, and the
+front never picks `float` "for speed". Charging for the node would penalise float
+code, and crediting it would be a speed claim we have not measured.
+
+## The bound lied twice, and how that was found
+
+### Interval subtraction, coordinate-wise
 
 On 25.09.2026 an outside reviewer ran the CLI on the very example this README opened with and reported that the printed bound was **zero** while the real error reached 6.7e-16. He was right, and the cause was three characters of code:
 
@@ -106,6 +205,64 @@ What changed, beyond the one-line fix:
 - The README example is now its own regression test, on the exact domain where the bound used to be zero.
 - One old test had to be rewritten: it demanded that `x*x − y*y` be rewritten on `[1,2]×[1,2]`, and it only ever passed because the bound there was zero. On that domain the rewrite genuinely buys nothing.
 - Every benchmark table below was regenerated from scratch afterwards. The conclusions held; several bounds grew, which is what a fix in this direction should do.
+
+### Interval endpoints, with no directed rounding
+
+The second one had been there since the first commit, and it was found on
+26.09.2026 by the work on conditionals rather than by a fuzzer. Intervals were
+computed with ordinary binary64 arithmetic. That means every operation on an
+interval **endpoint** was itself rounded — and could round *inward*, making the
+interval narrower than the true range of values. Since the rounding error of an
+operation is scaled by the magnitude taken from the interval, an interval narrower
+than the truth gives a bound lower than the truth, which is not a bound.
+
+What made it visible was a comparison, not a bound: on `(x + 1e16) - 1e16 > 0` with
+`x ∈ [0.1, 1.9]` the true value is `x`, strictly positive. But `1e16 + 0.1` is exactly
+`1e16` in binary64, and after the subtraction the interval collapsed to the single
+point `(0, 0)`. The analysis then declared the `> 0` branch **unreachable**, while it
+is in fact taken always. The wrong conclusion about the program was loud; the same
+defect inside a bound had been silent.
+
+The proper cure is directed rounding — the lower endpoint computed rounding down, the
+upper rounding up. Python does not expose the FPU rounding mode, so the equivalent is
+done instead: compute as usual, then step each endpoint outward with `math.nextafter`.
+One double operation is off by at most half an ulp, so one step suffices; two are
+taken, to cover the library functions that the standard does not promise to round
+correctly.
+
+Affine arithmetic needed more than a step outward, because its centre and
+coefficients accumulate their own rounding across many operations — and affine forms
+exist precisely in order to *narrow* the interval, so their own error works against
+their purpose. Each form now carries a third field bounding the error of its own
+computation, propagated by the same rules the rest of the analysis uses, and the
+interval it reports is widened by it.
+
+The price of the fix, measured by regenerating the whole FPBench table: the bounds as
+written are unchanged on twelve of thirteen cases and 0.8% worse on `turbine3`; the
+rewritten bounds are unchanged except `sqroot`, 1.9% worse. Search time grew about
+13%. Under two percent, for the difference between a bound and a number that looks
+like one.
+
+## Reading C, and refusing to
+
+The front-end accepts a deliberately narrow subset: `double` and `float` locals and
+parameters, `if`/`else` with `&&` and `||`, loops with a constant trip count, and the
+functions we have a rounding bound for. Everything else — pointers, arrays with a
+computed index, `while`, integer arithmetic as part of the computation, a call to
+`sin` — is refused **with the line number**.
+
+That ratio is the point. A parser that quietly pretends to understand an unfamiliar
+construct produces a bound for a program other than the one in the file, and the
+reader has no way to tell. That is worse than having no tool: a number you trust
+which describes different code. Sixteen of the forty-one front-end tests check that
+something is refused rather than approximated.
+
+Types follow the rules of C rather than intuition, because getting them wrong is the
+same failure in a quieter form. In `float a, b; a*b` the multiply happens in
+binary32; in `a*2.0` it happens in binary64, because the literal is a double;
+`a*2.0f` is back in binary32; assigning into a `float` rounds; returning from a
+`float` function rounds. `0.1f` is not one tenth, it is the nearest binary32 value,
+and it is stored as that.
 
 ## The bound is tested, not asserted
 

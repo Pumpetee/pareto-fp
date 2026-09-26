@@ -1,0 +1,110 @@
+name: release
+
+# Готовые к запуску файлы под три системы. Без них репозиторий не проверяют
+# чужими руками: первый шаг «поставь Python, склонируй, разберись с путями»
+# отсекает почти всех, кому результат мог быть интересен.
+#
+# Собирается два вида артефактов, и оба нужны:
+#   pareto-fp.pyz  — один файл, работает везде, где есть Python 3.10 и старше;
+#   pareto-fp(.exe) — самостоятельный бинарник, Python не нужен вовсе. Собирается
+#                     НА целевой системе: кросс-сборки PyInstaller не делает,
+#                     поэтому здесь три отдельных задания, а не одно.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  pyz:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: build the single-file application
+        run: python tools/build_release.py
+      - name: it must run on the oldest supported Python too
+        run: |
+          python -m pip install --quiet --upgrade pip
+          python dist/pareto-fp.pyz "sqrt(x+1) - sqrt(x)" --domain x=1e6..1e9
+      - uses: actions/upload-artifact@v4
+        with:
+          name: pareto-fp-pyz
+          path: dist/pareto-fp.pyz
+
+  binaries:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            asset: pareto-fp-linux-x86_64
+          - os: macos-latest
+            asset: pareto-fp-macos-arm64
+          - os: windows-latest
+            asset: pareto-fp-windows-x86_64.exe
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: PyInstaller
+        run: python -m pip install --quiet pyinstaller
+      - name: build and smoke-test the binary
+        run: python tools/build_release.py --binary
+      - name: the binary must also read a C file, not only an expression
+        shell: bash
+        run: |
+          BIN=dist/pareto-fp
+          if [ "${{ runner.os }}" = "Windows" ]; then BIN=dist/pareto-fp.exe; fi
+          "$BIN" --file examples/rosa_turbine.c --list
+          "$BIN" --file examples/rosa_turbine.c --function turbine1
+      - name: name the asset after the system it was built on
+        shell: bash
+        run: |
+          mkdir -p upload
+          if [ "${{ runner.os }}" = "Windows" ]; then
+            cp dist/pareto-fp.exe "upload/${{ matrix.asset }}"
+          else
+            cp dist/pareto-fp "upload/${{ matrix.asset }}"
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: upload/${{ matrix.asset }}
+
+  publish:
+    # Релиз собирается только по тегу: ручной запуск нужен, чтобы проверить сборку,
+    # а не чтобы каждый раз плодить релизы.
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [pyz, binaries]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: assets
+      - name: attach everything to the release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: assets/**/*
+          body: |
+            Ready-to-run files. Pick one:
+
+            * `pareto-fp.pyz` — one file, needs Python 3.10 or newer:
+              `python pareto-fp.pyz "sqrt(x+1) - sqrt(x)" --domain x=1e6..1e9`
+            * `pareto-fp-linux-x86_64`, `pareto-fp-macos-arm64`,
+              `pareto-fp-windows-x86_64.exe` — standalone, no Python needed.
+
+            On a C file:
+
+            `pareto-fp --file kernel.c --list`
+            `pareto-fp --file kernel.c --function turbine1`
+
+            Ranges for the inputs are mandatory: without them there is no error
+            bound to prove. Put them next to the function as
+            `// @domain x: 1 .. 2`, or pass `--domain x=1..2`.
