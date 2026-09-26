@@ -25,36 +25,6 @@ paste into code : ((x - y) * (y + x))
 
 The domain matters as much as the expression. On `x, y ∈ [1, 2]` this same rewrite buys nothing: the bound stays around 1e-15 either way, because absolute rounding error does not care about cancellation when the operands are far apart. The gain above comes from `x` and `y` being close, which is exactly when the difference of squares destroys significant digits.
 
-## Why this is not just `-ffast-math`
-
-`-ffast-math` optimises for speed only. It never improves accuracy, and it never tells you what it cost you. Measured on real native code, `clang 23.1.2`, x86-64:
-
-| case | form | best clang time | our form, same flags | error, clang | error, ours |
-|---|---|---|---|---|---|
-| `x*x - y*y` | difference of squares | 0.178 ms | **0.111 ms** | 1.21e-08 | **1.02e-51** |
-| `log(a) - log(b)` | log ratio | 4.326 ms | **2.279 ms** | 2.29e-16 | **1.30e-16** |
-| `(a/c) + (b/c)` | common divisor | 0.295 ms | 0.295 ms | 7.21e-17 | 7.21e-17 |
-| `(a/b)/c` | division chain | 0.295 ms | 0.295 ms | 1.01e-16 | 1.01e-16 |
-| `exp(a) * exp(b)` | exponent sum | 1.932 ms | 1.932 ms | 3.23e-16 | 3.23e-16 |
-| `sqrt(x+1) - sqrt(x)` | root difference | 1.004 ms | 1.004 ms | 1.99e-07 | 1.99e-07 |
-| poly | cubic polynomial | 0.179 ms | 0.179 ms | 9.45e-16 | 9.45e-16 |
-
-All seven cases are in the table, including the four where we change nothing. Where the value is: on the difference of squares `-ffast-math` leaves the error at 1.21e-08 — it optimises for speed and never for accuracy — while our form is exact **and** 1.6x faster. On the log ratio the compiler does not do the rewrite at all, we are 1.9x faster with half the error. On the remaining three the compiler already performs the same transformation itself, and that is fine: the two are not competitors. Our rewrite makes `-ffast-math` safe instead of replacing it.
-
-### Array summation
-
-65 536 elements, three datasets, every scheme compiled in all three modes (`python pareto/run_fairreduce.py`):
-
-| | naive at `-O2` | naive, best mode | our best scheme | speedup vs best clang | accuracy gain |
-|---|---|---|---|---|---|
-| uniform | 14.7 ms | 3.8 ms (`fast`) | **1.9 ms** | **2.00x** | 2.58x |
-| mixed | 14.7 ms | 3.8 ms (`fast`) | **1.9 ms** | **1.99x** | 1.25x |
-| alternating | 14.7 ms | 3.7 ms (`fast`) | **1.9 ms** | **1.94x** | 6.87x |
-
-Against an ordinary `-O2` build the gain is 7.6–7.8x. Against the best the compiler can do on its own — vectorised and with reassociation allowed — it is still **2x**, and that 2x comes with better accuracy, not worse. Both numbers are in the table above, measured the same way.
-
-One finding worth its own line: `-ffast-math` **destroys compensated summation**. Kahan and Neumaier drop from 5e-17 to 3.5e-15 error under `-ffast-math`, because the compiler proves the compensation term is algebraically zero and deletes it. Hand-written numerical safeguards silently stop working — ours do not, because the form is chosen before that stage.
-
 ## Install and run
 
 No dependencies, Python 3.10+:
@@ -66,212 +36,53 @@ python -m pareto.cli "sqrt(x+1) - sqrt(x)" --domain x=1e6..1e9
 
 Ranges are mandatory: without knowing the inputs there is no error bound to prove.
 
-Reproduce the benchmark table above (needs `clang` in `PATH`, or set `PARETO_CLANG`):
+## What it measures about itself
 
-```
-python pareto/run_fairbench.py            # all cases, three compilation modes each
-python pareto/run_fairbench.py sq_diff    # one case
-```
+Numbers below are produced by CI on a clean runner and published as artifacts.
+None of them is a comparison with another tool; those live in
+[docs/comparison.md](docs/comparison.md).
 
-Raw numbers land in `bench/fair_results.json`, the report in `bench/fair_report.txt`. CI runs the same benchmark on a clean Ubuntu runner and uploads both files as artifacts.
+**Proven bounds on the FPBench rosa cases.** The bound for the expression as
+written, and for the form this tool returns:
 
-## It runs through real MLIR, not only through a Python harness
-
-Both forms are emitted into the `func` / `arith` / `math` dialects and lowered by stock `mlir-opt` and `mlir-translate` — no custom hacks in the pipeline:
-
-```
-MLIR_BIN=/path/to/llvm/build/bin python pareto/run_mlir.py sq_diff
-python -m pareto.to_mlir "(x + y) * (x - y)" --name sq_diff_opt
-```
-
-Measured through that path (`clang -O2`, no fast-math flags on the emitted IR):
-
-| case | speedup over the original form | accuracy gain |
+| case | as written | rewritten |
 |---|---|---|
-| `x*x - y*y` | 1.00x | **1.2e+43x** |
-| `exp(a) * exp(b)` | **2.14x** | 0.76x |
-| `log(a) - log(b)` | **1.70x** | 1.76x |
-| `(a/c) + (b/c)` | **1.67x** | 1.88x |
-| `(a/b)/c` | **1.64x** | 1.63x |
-| `sqrt(x+1) - sqrt(x)` | 1.01x | 1.00x |
-| poly | 1.00x | 1.02x |
+| verhulst | 1.587e-16 | 1.587e-16 |
+| predatorPrey | 9.519e-17 | 9.432e-17 |
+| sine | 4.071e-16 | 3.005e-16 |
+| sqroot | 4.857e-16 | 2.784e-16 |
+| rigidBody1 | 2.132e-13 | 1.155e-13 |
+| rigidBody2 | 2.231e-11 | 1.504e-11 |
+| turbine1 | 1.239e-14 | 1.132e-14 |
+| turbine2 | 1.335e-14 | 1.321e-14 |
+| turbine3 | 7.125e-15 | 5.874e-15 |
+| carbonGas | 5.712e-09 | 3.925e-09 |
 
-Reports: `bench/mlir_report.txt`, `bench/mlir_results.json`. Generated modules are kept in `bench/mlir_*.mlir` so the lowering can be re-run by hand.
+**How loose the bound is.** Proven bound divided by the largest error measured
+over 600 random points plus the domain corners, across the 15 forms on the
+benchmark fronts: never below the measured error, from x1.44 to x664, **median
+x2.58**. A factor of two or three is the ordinary price of a worst-case
+guarantee; the outlier is a form whose real error is near zero.
 
-## How it works
+**What the analysis costs.** On the ten cases above, nine finish within a second
+end to end; `predatorPrey` takes 7.5 s and `carbonGas` 215 s.
 
-1. The expression goes into an e-graph. Saturation applies 27 rewrite rules until the graph stops growing, so one e-class holds every equivalent form.
-2. Every e-class gets an interval for its value. Forms inside a class are equivalent, so the class interval is the intersection of all estimates.
-3. Every form gets two metrics: machine cost (work plus critical path) and an upper bound on the absolute error, using `fl(a∘b) = (a∘b)(1+δ)`, `|δ| ≤ 2^-53`.
-4. Non-dominated (cost, error) pairs are collected bottom-up and the tree is reconstructed.
-5. A policy picks a point: cheapest form within an accuracy budget, or most accurate form within a cost budget.
+**How the bound is checked.** 33 tests, plus property-based interval tests and a
+fuzzer that generates random expressions and random domains and requires the
+measured error to stay under the printed bound. The fuzzer is what found the last
+nine defects in the bound, including two on the same day it was extended.
 
-## Against Herbie
+**Supported input.** Straight-line scalar expressions and array reductions over
+`+ - * /`, `sqrt`, `exp`, `log`, `fma`, `expm1`, `log1p`, `hypot` and integer
+powers. No loops, no conditionals, no matrices.
 
-[Herbie](https://herbie.uwplse.org/) solves half of the same problem: it finds a numerically stable form, but it does not model cost and does not give a proven bound. Both tools were run on the same seven cases, and the forms Herbie produced were scored with our own model.
+## Where to read further
 
-### First, the comparison on Herbie's own ruler
-
-Scoring someone else's tool with your own metric proves nothing, so the honest test is the reverse: measure both on **Herbie's** metric — average bits of error over sampled inputs, `log2(1 + ulp distance)` against a 60-digit reference rounded to double, 4000 points per case, fixed seed.
-
-| case | original | ours | Herbie | verdict |
-|---|---|---|---|---|
-| `diff_sqrt` | 27.197 | **0.319** | 0.370 | ours better |
-| `poly` | 0.328 | 0.283 | 0.267 | tie |
-| `two_div` | 0.254 | 0.254 | 0.220 | tie |
-| `div_chain` | 0.267 | 0.267 | 0.267 | tie |
-| `log_ratio` | 0.344 | 0.064 | 0.064 | tie |
-| `exp_sum` | 0.352 | 0.352 | **0.216** | **Herbie better** |
-| `sq_diff` | 16.476 | 0.122 | 0.122 | tie |
-
-**On Herbie's metric this project is level with him: one win, five ties, one loss.** Both tools take the two catastrophic cases from tens of bits of error down to a fraction of a bit, and on the rest they land within noise of each other. Anyone told that this tool "beats Herbie on accuracy" was told something false.
-
-### Where the difference actually shows up: price
-
-Herbie has no cost model. It returns a numerically good form and stops there, so the form it picks is often the more expensive one — `fma(a, 1/c, b/c)` carries two divisions where `(a+b)/c` has one, `exp(b)/exp(-a)` trades a multiply for a divide plus a negation. Both forms compiled into one binary per case, identical flags, `-O3 -ffp-contract=off`:
-
-| case | Herbie | ours | speedup | Herbie error | our error |
-|---|---|---|---|---|---|
-| `diff_sqrt` | 5.461 ms | **3.763 ms** | **1.45x** | 2.759e-16 | 2.201e-16 |
-| `poly` | **1.680 ms** | 2.182 ms | 0.77x | 7.115e-16 | 7.115e-16 |
-| `exp_sum` | 6.764 ms | **5.434 ms** | **1.24x** | 2.188e-16 | 2.465e-16 |
-| `two_div` | 1.676 ms | 1.676 ms | 1.00x | 1.282e-16 | 1.353e-16 |
-| `div_chain` | 1.676 ms | 1.676 ms | 1.00x | 1.646e-16 | 1.646e-16 |
-| `log_ratio` | 3.955 ms | 3.968 ms | 1.00x | 1.314e-16 | 1.302e-16 |
-| `sq_diff` | 0.841 ms | 0.841 ms | 1.00x | 3.064e-09 | 3.064e-09 |
-
-**Faster on two of seven, slower on one, geometric mean 1.05x, accuracy level throughout.** That is the honest size of the win: not an order of magnitude, a few percent on average and 1.45x on the best case — earned by having a cost model where the other tool has none. On `poly` we lose: his form is 1.3x faster at identical accuracy, and our cost model preferred the wrong point. Reproduce with `python pareto/run_vs_herbie_speed.py`.
-
-Worth stating plainly: on these seven cases both tools have hit the floor of double precision. Worst observed error is one to two ulps on either side, so "more accurate than Herbie" is not a thing that can be won here by anyone.
-
-The actual difference is not accuracy, it is what you get back. Herbie returns one form with an empirical improvement and no guarantee. This returns the whole cost-versus-error front with a **statically proven worst-case bound** on every point, so a caller can say "give me the cheapest form that loses at most one bit" and have that hold for every input in the range, not on average over a sample. Reproduce with `python pareto/run_herbie_metric.py`, raw numbers in `bench/herbie_metric_report.txt`.
-
-Caveat worth naming: Herbie samples inputs over the floating-point representation, this script samples uniformly over the value range. On a wide domain like `1e6..1e9` those distributions differ.
-
-### Second, the front-coverage question
-
-A single form against a whole front is not a fair pairing either, so the other question asked is: **does our front contain a point no worse than Herbie's answer on both of our metrics at once?** Scored with our bound and our cost model — our ruler, stated plainly, so read it as coverage and not as superiority.
-
-| case | Herbie's form | covered by our front (our metrics) |
-|---|---|---|
-| `sqrt(x+1) - sqrt(x)` | `1 / fma(x, 1/sqrt(x), sqrt(1+x))` | yes, dominated on both |
-| `2.5x³ + 3.5x² + …` (poly) | `fma(x, fma(4.5x, x, 2.5), fma(3.5x, x, 1.5))` | yes, dominated on both |
-| `(a/c) + (b/c)` | `fma(a, 1/c, b/c)` | yes, dominated on both |
-| `(a/b)/c` | `(a/b)/c` | equal point, nothing better |
-| `log(a) - log(b)` | `log(a/b)` | yes, dominated on both |
-| `exp(a) * exp(b)` | `exp(b) / exp(-a)` | yes, dominated on both |
-| `x*x - y*y` | `fma(y, x-y, (x-y)*x)` | yes, dominated on both |
-
-Note how differently the two tables read. Under our worst-case bound Herbie's forms look dominated everywhere; under his average-bits metric the same forms are level with ours. Both statements are true, and that gap is exactly what "choose your own metric" buys — which is why the first table is the one that counts.
-
-Reproduce: `raco pkg install --auto herbie`, then `python pareto/run_herbie.py`. Raw output in `bench/herbie_report.txt`, the FPCore files Herbie produced are kept in `bench/herbie_improved.fpcore`.
-
-Herbie leans heavily on `fma`, and the first run of this comparison lost two cases because our rules did not generate it. They do now — and that turned into the most instructive finding in the project, see below.
-
-### The `fma` trap
-
-Adding `fma` to the rules made the model happy and the machine unhappy. `fma` rounds once instead of twice, so on paper it is both cheaper and more accurate, and the search immediately started preferring it. On the actual CPU the opposite happened:
-
-| case | form chosen | `-O3` | `-O3 -mfma` |
-|---|---|---|---|
-| poly | `fma(fma(x,4.5,3.5), x*x, fma(x,2.5,1.5))` | 1.43 ms | 0.34 ms |
-| poly | plain Horner scheme | 0.36 ms | 0.31 ms |
-
-Hardware FMA is not part of baseline x86-64. Without `-mfma` or `-march=native` the call goes to libm — correctly rounded and four times slower. Worse, on the difference of squares the search happily traded our best result away: it picked an `fma` form with error 5.8e-09 over the exact `(x+y)(x-y)` with 1e-51, because the model said `fma` was cheaper.
-
-Fix: `fma` now costs *more* than a multiply-add pair by default (`PARETO_FMA_COST`, set it to `1.0` on a machine where FMA is enabled). The exact form came back, and the accuracy result with it. This is the same lesson the project already learned once on summation — an analytical cost model without calibration will confidently pick a worse form.
-
-## The harder benchmark
-
-The seven cases above are too easy for a comparison: after rewriting both tools sit at one or two ulps, which is the floor of double precision, and any difference there is noise. `pareto/hard_cases.py` adds nine problems from actual numerical analysis, where the error as written runs into tens of bits. Scoreboard, both rulers at once (`python pareto/run_hard_scoreboard.py`):
-
-| case | as written | ours | Herbie | our bound | his bound | our cost | his cost |
-|---|---|---|---|---|---|---|---|
-| `sq_expand` — `(a+b)²−(a−b)²` | 34.01 | **0.00** | 0.00 | 8.88e-15 | 8.88e-15 | 4.0 | 4.0 |
-| `hypot` — `sqrt(x²+y²)` | 61.09 | **0.00** | 0.00 | 1.57e+139 | 1.57e+139 | 24.0 | 24.0 |
-| `exp_minus_one` — `exp(x)−1` | 19.46 | **0.00** | 0.24 | **1.11e-22** | 2.22e-22 | 44.0 | 15.6 |
-| `log_one_plus` — `log(1+x)` | 19.49 | **0.00** | 0.27 | 1.11e-22 | 1.11e-22 | 44.0 | 44.0 |
-| `cube_diff` — `x³−y³` | 16.39 | **0.15** | 0.16 | 2.44e-12 | 2.44e-12 | 15.6 | 15.6 |
-| `ratio_cancel` — `(x²−1)/(x−1)` | 8.02 | 0.25 | 0.25 | 2.22e-16 | 2.22e-16 | 2.0 | 2.0 |
-| `exp_series` — Taylor, 8 terms | 0.53 | 0.28 | 0.28 | 1.03e-14 | 1.03e-14 | 73.0 | 35.2 |
-| `quadratic_root` | 47.14 | 0.51 | **0.26** | 5.55e-22 | 4.44e-23 | 60.6 | 27.0 |
-| `variance` — `E[x²]−E[x]²` | 43.74 | 43.11 | n/a | 7.52e-04 | — | 49.8 | — |
-
-**Two wins, five ties, one loss, and one case where his answer uses operations we do not have.** Numbers are mean bits of error over 1500 sampled inputs, same reference for both.
-
-Three things carry those results. `expm1`, `log1p` and `hypot` as first-class operations — real identities, not approximations, and they close three cases outright. Constant folding, without which the tool emitted `(2+2)*(b*a)` and lost on price to `a*(4*b)` for no reason at all. And Taylor series as **certified** candidates: the Lagrange remainder, bounded by the maximum derivative over the domain, is added to the rounding error of the polynomial itself, so the printed bound covers the method error too. Herbie substitutes series as well, but ships no guarantee with them.
-
-The remaining loss is honest: on the quadratic formula he expands in the small parameter and then cancels the division symbolically, ending at `−c/b − ac²/b³`. We reach 0.51 bits from 47.14 by the same kind of expansion, but keep a common factor we cannot cancel — that needs a conditional rewrite rule, and conditional rules are where this project has already broken correctness once.
-
-## Against FPTaylor and Daisy
-
-Herbie rewrites but proves nothing. FPTaylor proves but cannot rewrite. Daisy does
-both, and is therefore the closest thing to a direct competitor. All three publish
-on the same FPBench cases, so the comparison runs on exactly those, with the same
-domains and the same source form.
-
-Every number below was produced by the `rivals` job in CI on a clean Ubuntu runner:
-FPTaylor from the js_of_ocaml build its authors publish, Daisy built from source
-with sbt and checked against the reference number in its own README before being
-believed. Raw output lives in `bench/rivals_report.txt` and `bench/rivals_results.json`,
-both committed straight from the run artifact. Reproduce with
-**Actions -> tests -> Run workflow**; nothing here needs my machine.
-
-### Analysis against analysis - the bound for the original form
-
-| case | ours | FPTaylor | Daisy |
-|---|---|---|---|
-| verhulst | **1.587e-16** | 2.275e-16 | 3.719e-16 |
-| predatorPrey | **9.519e-17** | 1.530e-16 | 1.749e-16 |
-| sine | 4.071e-16 | **3.864e-16** | 1.130e-15 |
-| sqroot | **4.857e-16** | 4.875e-16 | 5.707e-16 |
-| rigidBody1 | **2.132e-13** | 2.949e-13 | 2.949e-13 |
-| rigidBody2 | **2.231e-11** | 3.544e-11 | 3.553e-11 |
-| turbine1 | **1.239e-14** | 1.639e-14 | 8.648e-14 |
-| turbine2 | **1.335e-14** | 1.928e-14 | 1.307e-13 |
-| turbine3 | **7.125e-15** | 9.111e-15 | 6.231e-14 |
-| carbonGas | **5.712e-09** | 6.606e-09 | 1.652e-07 |
-
-Nine of ten against FPTaylor, ten of ten against Daisy. The one loss is `sine`, by
-five percent.
-
-### What the user actually gets
-
-The table above compares analysers. It is not what a user takes home, because a
-user is free to ship a different form of the same expression - and rewriting is the
-thing neither rival can do at all. So: our bound for our rewritten form against
-their bound for the original.
-
-| case | ours, rewritten | vs FPTaylor | vs Daisy |
-|---|---|---|---|
-| sine | 3.005e-16 | 1.29x | 3.76x |
-| verhulst | 1.587e-16 | 1.43x | 2.34x |
-| turbine1 | 1.132e-14 | 1.45x | 7.64x |
-| turbine2 | 1.321e-14 | 1.46x | 9.89x |
-| turbine3 | 5.874e-15 | 1.55x | 10.61x |
-| predatorPrey | 9.432e-17 | 1.62x | 1.85x |
-| carbonGas | 3.925e-09 | 1.68x | 42.11x |
-| sqroot | 2.784e-16 | 1.75x | 2.05x |
-| rigidBody2 | 1.504e-11 | 2.36x | 2.36x |
-| rigidBody1 | 1.155e-13 | 2.55x | 2.55x |
-
-Ten of ten, against both. `sine` wins here despite losing above, which is the whole
-point: the tool that can change the formula does not have to win on the formula it
-was handed.
-
-Search time on the same run: nine of the ten cases finish inside a second,
-`predatorPrey` takes 7.5s, and `carbonGas` takes 215s. That last one is the honest
-outlier and the next thing to fix.
-
-## What is not new here
-
-Being explicit about this, because it is the first question any compiler person asks:
-
-- Pairwise and blocked summation, Kahan compensation — decades old.
-- E-graphs and equality saturation — the `egg` library and the work around it.
-- Improving accuracy of floating-point formulas — [Herbie](https://herbie.uwplse.org/) does exactly that, and does it well.
-
-What is new is the combination: **both metrics computed together**, an error budget given as a number and *proven* rather than hoped for, and a cost model calibrated against the actual machine. The last one came from practice — the analytical model was off by 3x on pairwise summation, and without calibration the tool would have picked a strictly worse form.
+- [docs/how-it-works.md](docs/how-it-works.md) — the pipeline, the compilation
+  path through MLIR, how the bound is verified, how loose it is and why, what the
+  search costs, and the one time the bound lied.
+- [docs/comparison.md](docs/comparison.md) — measurements next to Herbie,
+  FPTaylor and Daisy, and an explicit list of what in this project is not new.
 
 ## Limitations
 
@@ -280,66 +91,8 @@ What is new is the combination: **both metrics computed together**, an error bud
 - On Windows, `mlir-opt` refuses paths containing non-ASCII characters, so the MLIR pipeline stages its files in a temporary directory.
 - Timings in the tables were taken on a single laptop CPU (Ryzen 5 5500U, 15 W, thermally limited). CI re-runs the same benchmark on two architectures — Linux x86-64 and macOS arm64 — and publishes the raw numbers as artifacts, so the ratios can be checked on hardware that is not mine. Accuracy figures are bit-for-bit identical everywhere, as IEEE arithmetic requires; only the speed ratios move.
 - The cost model uses operation weights, not measured latency, and the `fma` weight is calibrated on that same laptop. On different hardware the ordering of points on the front can change.
-- Interval arithmetic ignores correlation between repeated variables, so bounds are conservative — measured at median x2.42, see "How loose is the bound".
-- Saturation on expressions with roots reaches thousands of nodes and extraction takes seconds, see "What the search costs".
-
-## The bound once lied, and how that was found
-
-On 25.09.2026 an outside reviewer ran the CLI on the very example this README opened with and reported that the printed bound was **zero** while the real error reached 6.7e-16. He was right, and the cause was three characters of code:
-
-```python
-def iv_sub(a, b): return (a[0] - b[0], a[1] - b[1])   # wrong
-def iv_sub(a, b): return (a[0] - b[1], a[1] - b[0])   # correct
-```
-
-Interval subtraction was written coordinate-wise. On `[1,2] − [1,2]` it returned `(0, 0)` instead of `(−1, 1)`, the interval collapsed to a point, and since rounding error is computed as `U · max|interval|`, the "proven bound" collapsed with it. Every number this project printed as a guarantee was suspect for as long as that line existed.
-
-Worse than the bug is why the tests stayed green. `test_bound.py` exercised `sq_diff` on a narrow domain around 1000, where the broken interval was still non-zero and happened to cover the measurement. The README example was in no test at all. A test suite that only visits the places you already trust is decoration.
-
-What changed, beyond the one-line fix:
-
-- `tests/test_intervals.py` is property-based — random intervals per operation, a grid of points inside, and the result must lie within the interval the analysis returned. It fails on **any** operation that is wrong, not only on the one someone remembered.
-- The README example is now its own regression test, on the exact domain where the bound used to be zero.
-- One old test had to be rewritten: it demanded that `x*x − y*y` be rewritten on `[1,2]×[1,2]`, and it only ever passed because the bound there was zero. On that domain the rewrite genuinely buys nothing.
-- Every benchmark table below was regenerated from scratch afterwards. The conclusions held; several bounds grew, which is what a fix in this direction should do.
-
-## The bound is tested, not asserted
-
-`tests/test_bound.py` rebuilds the Pareto front and checks, on every form it finds, that the error actually measured against a 60-digit `Decimal` reference never exceeds the bound the analysis proved. Inputs are drawn pseudo-randomly with a fixed seed plus the domain corners — deliberately not a uniform grid, since cancellation lives in narrow spots a grid can step over.
-
-### How loose is the bound
-
-Interval arithmetic ignores correlation between repeated occurrences of the same variable, so the bound is conservative by construction. That is a real weakness and it deserves a number rather than a disclaimer, so `pareto/run_tightness.py` measures it: proven bound divided by the largest error observed over 600 random points plus both corners.
-
-Across the 15 forms on the benchmark fronts: **never below the measured error, looseness from x1.44 to x664, median x2.58.** A factor of two or three is the normal price of a worst-case guarantee; the x664 outlier is the most accurate `diff_sqrt` form, where the real error is near zero and any bound looks huge next to it.
-
-The adversarial group is the interesting one — expressions where the same variable repeats, the worst case for intervals:
-
-| expression | bound as written | real error | after rewriting |
-|---|---|---|---|
-| `x / x` | 2.22e-16 | 0 | `1`, bound 0 |
-| `x*x - x*x` | 8.88e-16 | 0 | `0`, bound 0 |
-| `(x*x) / x` | 1.33e-15 | 2.22e-16 (x6 loose) | `x`, bound 0 |
-| `sqrt(x) - sqrt(x)` | 4.44e-16 | 0 | `0`, bound 0 |
-
-So the criticism lands and then partly answers itself: the analysis alone cannot see that `x/x` is exactly one, but rewriting collapses exactly those self-cancelling patterns, and the bound on the resulting form is not conservative — it is zero. What remains conservative is the case of a variable repeated in a form that cannot be collapsed, and there the measured price is around x6.
-
-The test is tight enough to catch a regression: halving any bound makes it fail.
-
-## What the search costs
-
-E-graph saturation blows up, and the number worth knowing is how much. Measured on the seven benchmark cases:
-
-| case | nodes after saturation | classes | front | saturate | extract |
-|---|---|---|---|---|---|
-| `diff_sqrt` | 6056 | 714 | 2 | 1.75 s | 6.18 s |
-| `sq_diff` | 434 | 100 | 2 | 0.05 s | 0.04 s |
-| `poly` | 236 | 29 | 6 | 0.04 s | 0.03 s |
-| the other four | 9–10 | 6–7 | 1–2 | < 0.01 s | < 0.01 s |
-
-Roots are the blow-up: six nodes become 6056, a thousandfold, and extraction — not saturation — becomes the bottleneck, since every class carries its own front of non-dominated points. The `node_limit` of 60000 was not reached on any case, so nothing here is truncated.
-
-Eight seconds to analyse one numerical kernel is acceptable. Eight seconds per expression inside a compiler pass over a whole translation unit is not, and that is the honest reason this is a tool you point at a hot kernel today rather than a pass you enable globally.
+- Interval arithmetic ignores correlation between repeated variables, so bounds are conservative — measured at median x2.58, see [docs/how-it-works.md](docs/how-it-works.md).
+- Saturation on expressions with roots reaches thousands of nodes and extraction takes seconds, see [docs/how-it-works.md](docs/how-it-works.md).
 
 ## Status
 
