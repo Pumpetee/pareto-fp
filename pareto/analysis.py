@@ -577,17 +577,29 @@ def tree_cost_refined(tree, domain, boxes=None):
         if halves is None:
             break
         try:
+            # Внутри цикла — только интервальная оценка. Символическая стоит на два
+            # порядка дороже и по памяти, и по времени; 26.09.2026 она съедала
+            # 1.9 ГБ на одном выражении и убивала раннер в CI. Её достаточно
+            # посчитать один раз на всём домене и один раз на худшей коробке.
             r1 = tree_cost(tree, halves[0])
             r2 = tree_cost(tree, halves[1])
-            e1 = combined_bound(tree, halves[0])
-            e2 = combined_bound(tree, halves[1])
         except (ValueError, ZeroDivisionError, OverflowError, KeyError):
             break
-        work[i] = (e1, halves[0], r1[2])
-        work.append((e2, halves[1], r2[2]))
+        work[i] = (r1[1], halves[0], r1[2])
+        work.append((r2[1], halves[1], r2[2]))
         made += 1
 
     err = max(w[0] for w in work)
+    # Худшая коробка задаёт ответ — её одну и проверяем символически: если на ней
+    # символическая форма туже, весь максимум опускается до неё.
+    worst = max(work, key=lambda w: w[0])
+    try:
+        sym_worst = combined_bound(tree, worst[1])
+        if sym_worst < err:
+            others = max([w[0] for w in work if w is not worst] or [0.0])
+            err = max(sym_worst, others)
+    except (ValueError, ZeroDivisionError, OverflowError, KeyError):
+        pass
     lo = min(w[2][0] for w in work)
     hi = max(w[2][1] for w in work)
     # Подстраховка: если из-за tighten или модели рядов где-то нарушилась
