@@ -277,7 +277,8 @@ class EGraph:
         iv = self.ivs.get(self.uf.find(eid))
         return iv is not None and iv[0] > 0.0
 
-    def saturate(self, rules, iters=8, node_limit=60000, domain=None):
+    def saturate(self, rules, iters=8, node_limit=60000, domain=None,
+                 time_budget=None, match_limit=None):
         """rules: список (lhs, rhs, двусторонее?) или (lhs, функция).
 
         domain включает правила с предусловием: без него они молчат, потому что
@@ -285,22 +286,60 @@ class EGraph:
         """
         if domain:
             self.domain = domain
+
+        # 26.09.2026: поиск на predatorPrey не укладывался в 500 секунд и съедал
+        # 1.9 ГБ, хотя предел узлов стоял 20000. Предел проверялся при ПРИМЕНЕНИИ
+        # правил, а взрывался сбор совпадений: он обходит все правила по всему
+        # графу до единой проверки, и на графе в десятки тысяч узлов один круг
+        # набирает сотни тысяч совпадений. Три предохранителя: часы, потолок
+        # совпадений за круг и проверка размера ДО начала круга.
+        import os as _os
+        import time as _time
+        if time_budget is None:
+            time_budget = float(_os.environ.get('PARETO_SEARCH_SEC', 20.0))
+        if match_limit is None:
+            match_limit = int(_os.environ.get('PARETO_MATCH_LIMIT', 60000))
+        _deadline = _time.perf_counter() + time_budget if time_budget > 0 else None
+
         self.fold_constants()
         self.refresh_intervals()
+        self.stopped_by = None
         for _round in range(iters):
+            if len(self.hashcons) > node_limit:
+                self.stopped_by = 'узлы'
+                break
+            if _deadline is not None and _time.perf_counter() > _deadline:
+                self.stopped_by = 'время'
+                break
             # интервалы освежаем не каждый круг: они нужны лишь условным правилам,
             # а их проверка терпит небольшое отставание — лишь бы не была неверной,
             # а устаревший интервал делает правило строже, а не слабее
             if _round and _round % 3 == 0:
                 self.refresh_intervals()
             matches = []
+            _over = False
             for rule in rules:
                 lhs, rhs = rule[0], rule[1]
                 for eid, subst in self.match(lhs):
                     matches.append((eid, rhs, subst))
+                    if len(matches) >= match_limit:
+                        _over = True
+                        break
+                if _over:
+                    self.stopped_by = 'совпадения'
+                    break
+                if _deadline is not None and _time.perf_counter() > _deadline:
+                    self.stopped_by = 'время'
+                    break
                 if len(rule) > 2 and rule[2]:  # двустороннее правило
                     for eid, subst in self.match(rhs):
                         matches.append((eid, lhs, subst))
+                        if len(matches) >= match_limit:
+                            _over = True
+                            break
+                if _over:
+                    self.stopped_by = 'совпадения'
+                    break
             before_nodes = len(self.hashcons)
             before_classes = len({self.uf.find(e) for e in self.classes})
             for eid, rhs, subst in matches:
@@ -308,6 +347,10 @@ class EGraph:
                 # выражении с корнями легко добавляет больше ста тысяч узлов, и
                 # проверка постфактум опаздывает на минуты машинного времени
                 if len(self.hashcons) > node_limit:
+                    self.stopped_by = 'узлы'
+                    break
+                if _deadline is not None and _time.perf_counter() > _deadline:
+                    self.stopped_by = 'время'
                     break
                 try:
                     # callable получает и eid: правилу с предусловием часто нужен
