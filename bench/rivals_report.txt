@@ -5,46 +5,49 @@ FPTaylor и Daisy против нас на наборе FPBench (rosa). Все �
 
 Таблица 1. Анализ против анализа: граница для ИСХОДНОЙ записи.
 case                  ours    FPTaylor       Daisy   кто тоньше
-verhulst         4.265e-16   2.275e-16         n/a   FPTaylor
-predatorPrey     1.745e-16   1.530e-16         n/a   FPTaylor
-sine             1.020e-15   3.864e-16         n/a   FPTaylor
-sqroot           7.806e-16   4.875e-16         n/a   FPTaylor
-rigidBody1       3.547e-13   2.949e-13         n/a   FPTaylor
-rigidBody2       3.980e-11   3.544e-11         n/a   FPTaylor
-turbine1         2.262e-13   1.639e-14         n/a   FPTaylor
-turbine2         2.711e-13   1.928e-14         n/a   FPTaylor
-turbine3         1.583e-13   9.111e-15         n/a   FPTaylor
+verhulst         1.587e-16   2.275e-16   3.719e-16   ours
+predatorPrey     9.519e-17   1.530e-16   1.749e-16   ours
+sine             4.071e-16   3.864e-16   1.130e-15   FPTaylor
+sqroot           4.857e-16   4.875e-16   5.707e-16   ours
+rigidBody1       2.132e-13   2.949e-13   2.949e-13   ours
+rigidBody2       2.231e-11   3.544e-11   3.553e-11   ours
+turbine1         1.239e-14   1.639e-14   8.648e-14   ours
+turbine2         1.335e-14   1.928e-14   1.307e-13   ours
+turbine3         7.125e-15   9.111e-15   6.231e-14   ours
+carbonGas        5.712e-09   6.606e-09   1.652e-07   ours
 
 Таблица 2. Что получает пользователь: наша граница для НАШЕЙ формы против их
 границ для исходной записи (им переписывать нечем).
 case            ours(rewr)    FPTaylor       Daisy   vs FPT  vs Daisy
-verhulst         3.954e-16   2.275e-16         n/a    0.58x      n/a
-predatorPrey     1.670e-16   1.530e-16         n/a    0.92x      n/a
-sine             5.725e-16   3.864e-16         n/a    0.67x      n/a
-sqroot           3.580e-16   4.875e-16         n/a    1.36x      n/a
-rigidBody1       2.348e-13   2.949e-13         n/a    1.26x      n/a
-rigidBody2       2.634e-11   3.544e-11         n/a    1.35x      n/a
-turbine1         8.077e-14   1.639e-14         n/a    0.20x      n/a
-turbine2         1.003e-13   1.928e-14         n/a    0.19x      n/a
-turbine3         5.263e-14   9.111e-15         n/a    0.17x      n/a
+verhulst         1.587e-16   2.275e-16   3.719e-16    1.43x     2.34x
+predatorPrey     9.432e-17   1.530e-16   1.749e-16    1.62x     1.85x
+sine             3.005e-16   3.864e-16   1.130e-15    1.29x     3.76x
+sqroot           2.784e-16   4.875e-16   5.707e-16    1.75x     2.05x
+rigidBody1       1.155e-13   2.949e-13   2.949e-13    2.55x     2.55x
+rigidBody2       1.504e-11   3.544e-11   3.553e-11    2.36x     2.36x
+turbine1         1.132e-14   1.639e-14   8.648e-14    1.45x     7.64x
+turbine2         1.321e-14   1.928e-14   1.307e-13    1.46x     9.89x
+turbine3         5.874e-15   9.111e-15   6.231e-14    1.55x    10.61x
+carbonGas        3.925e-09   6.606e-09   1.652e-07    1.68x    42.11x
 
 Таблица 3. Переписывание отдельно от нашего анализа: их же границы, посчитанные
 для нашей формы. Падение числа — заслуга переписывания, а не нашей модели ошибки.
 case           FPTaylor was FPTaylor now    Daisy was    Daisy now
-verhulst          2.275e-16    2.275e-16          n/a          n/a
-predatorPrey      1.530e-16    1.596e-16          n/a          n/a
-sine              3.864e-16    3.059e-16          n/a          n/a
-sqroot            4.875e-16    1.815e-16          n/a          n/a
-rigidBody1        2.949e-13    1.972e-13          n/a          n/a
-rigidBody2        3.544e-11    2.820e-11          n/a          n/a
-turbine1          1.639e-14    1.558e-14          n/a          n/a
-turbine2          1.928e-14    2.033e-14          n/a          n/a
-turbine3          9.111e-15    8.114e-15          n/a          n/a
+verhulst          2.275e-16    2.275e-16    3.719e-16    3.719e-16
+predatorPrey      1.530e-16    1.487e-16    1.749e-16    1.647e-16
+sine              3.864e-16    2.807e-16    1.130e-15    7.455e-16
+sqroot            4.875e-16    2.703e-16    5.707e-16    3.686e-16
+rigidBody1        2.949e-13    1.972e-13    2.949e-13    1.972e-13
+rigidBody2        3.544e-11    2.817e-11    3.553e-11    2.825e-11
+turbine1          1.639e-14    1.535e-14    8.648e-14    8.200e-14
+turbine2          1.928e-14    2.018e-14    1.307e-13    1.251e-13
+turbine3          9.111e-15    8.071e-15    6.231e-14    5.835e-14
+carbonGas         6.606e-09    4.859e-09    1.652e-07    3.452e-08
 
 Санитарная проверка: наша граница ниже измеренной ошибки на той же форме — нигде
 
-наша форма даёт границу ниже, чем FPTaylor на исходной записи: 3 из 9
-то же против Daisy: 0 из 9
-наша форма улучшает границу САМОГО FPTaylor: 6 из 9
-наша форма улучшает границу САМОЙ Daisy: 0 из 9
-суммарное время поиска: 769.9 c
+наша форма даёт границу ниже, чем FPTaylor на исходной записи: 10 из 10
+то же против Daisy: 10 из 10
+наша форма улучшает границу САМОГО FPTaylor: 8 из 10
+наша форма улучшает границу САМОЙ Daisy: 9 из 10
+суммарное время поиска: 226.8 c

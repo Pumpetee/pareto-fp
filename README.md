@@ -203,6 +203,66 @@ Three things carry those results. `expm1`, `log1p` and `hypot` as first-class op
 
 The remaining loss is honest: on the quadratic formula he expands in the small parameter and then cancels the division symbolically, ending at `−c/b − ac²/b³`. We reach 0.51 bits from 47.14 by the same kind of expansion, but keep a common factor we cannot cancel — that needs a conditional rewrite rule, and conditional rules are where this project has already broken correctness once.
 
+## Against FPTaylor and Daisy
+
+Herbie rewrites but proves nothing. FPTaylor proves but cannot rewrite. Daisy does
+both, and is therefore the closest thing to a direct competitor. All three publish
+on the same FPBench cases, so the comparison runs on exactly those, with the same
+domains and the same source form.
+
+Every number below was produced by the `rivals` job in CI on a clean Ubuntu runner:
+FPTaylor from the js_of_ocaml build its authors publish, Daisy built from source
+with sbt and checked against the reference number in its own README before being
+believed. Raw output lives in `bench/rivals_report.txt` and `bench/rivals_results.json`,
+both committed straight from the run artifact. Reproduce with
+**Actions -> tests -> Run workflow**; nothing here needs my machine.
+
+### Analysis against analysis - the bound for the original form
+
+| case | ours | FPTaylor | Daisy |
+|---|---|---|---|
+| verhulst | **1.587e-16** | 2.275e-16 | 3.719e-16 |
+| predatorPrey | **9.519e-17** | 1.530e-16 | 1.749e-16 |
+| sine | 4.071e-16 | **3.864e-16** | 1.130e-15 |
+| sqroot | **4.857e-16** | 4.875e-16 | 5.707e-16 |
+| rigidBody1 | **2.132e-13** | 2.949e-13 | 2.949e-13 |
+| rigidBody2 | **2.231e-11** | 3.544e-11 | 3.553e-11 |
+| turbine1 | **1.239e-14** | 1.639e-14 | 8.648e-14 |
+| turbine2 | **1.335e-14** | 1.928e-14 | 1.307e-13 |
+| turbine3 | **7.125e-15** | 9.111e-15 | 6.231e-14 |
+| carbonGas | **5.712e-09** | 6.606e-09 | 1.652e-07 |
+
+Nine of ten against FPTaylor, ten of ten against Daisy. The one loss is `sine`, by
+five percent.
+
+### What the user actually gets
+
+The table above compares analysers. It is not what a user takes home, because a
+user is free to ship a different form of the same expression - and rewriting is the
+thing neither rival can do at all. So: our bound for our rewritten form against
+their bound for the original.
+
+| case | ours, rewritten | vs FPTaylor | vs Daisy |
+|---|---|---|---|
+| sine | 3.005e-16 | 1.29x | 3.76x |
+| verhulst | 1.587e-16 | 1.43x | 2.34x |
+| turbine1 | 1.132e-14 | 1.45x | 7.64x |
+| turbine2 | 1.321e-14 | 1.46x | 9.89x |
+| turbine3 | 5.874e-15 | 1.55x | 10.61x |
+| predatorPrey | 9.432e-17 | 1.62x | 1.85x |
+| carbonGas | 3.925e-09 | 1.68x | 42.11x |
+| sqroot | 2.784e-16 | 1.75x | 2.05x |
+| rigidBody2 | 1.504e-11 | 2.36x | 2.36x |
+| rigidBody1 | 1.155e-13 | 2.55x | 2.55x |
+
+Ten of ten, against both. `sine` wins here despite losing above, which is the whole
+point: the tool that can change the formula does not have to win on the formula it
+was handed.
+
+Search time on the same run: nine of the ten cases finish inside a second,
+`predatorPrey` takes 7.5s, and `carbonGas` takes 215s. That last one is the honest
+outlier and the next thing to fix.
+
 ## What is not new here
 
 Being explicit about this, because it is the first question any compiler person asks:
