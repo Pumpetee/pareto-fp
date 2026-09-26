@@ -12,7 +12,10 @@ from __future__ import annotations
 
 import math
 
-from pareto.analysis import (eval_interval, iv_abs_max, iv_abs_min, op_unit, tighten)
+U = 2.0 ** -53
+
+from pareto.analysis import (eval_interval, exact_op, half_ulp, iv_abs_max,
+                             iv_abs_min, op_unit, tighten)
 from pareto.symbolic_error import ErrForm, node_key
 
 INF = float('inf')
@@ -49,9 +52,24 @@ def symbolic_error(tree, domain):
         return None, None
 
     key = node_key(tree)
-    # Тот же бюджет округления по операциям, что и в интервальном пути: иначе
-    # символическая форма осталась бы несостоятельной на exp/log (дефект 26.09.2026).
-    mag = iv_abs_max(out_iv) * op_unit(op)
+    # Символический путь держит ту же модель округления, что и интервальный:
+    # бюджет по операциям (exp/log не корректно округлены), половина улпы вместо
+    # U * |значение| и признание точных операций. Иначе символическая оценка
+    # оказывалась хуже интервальной там, где должна была выигрывать, и минимум из
+    # двух её просто не выбирал — на sine это и стоило нам девятой победы.
+    #
+    # ErrForm хранит слагаемое как U * magnitude, поэтому величину пересчитываем
+    # обратно в эту единицу.
+    _kid_errs = []
+    for form, _iv in kids:
+        try:
+            _kid_errs.append(form.bound())
+        except Exception:
+            _kid_errs.append(float('inf'))
+    if exact_op(tree, ivs, _kid_errs, out_iv):
+        mag = 0.0
+    else:
+        mag = half_ulp(iv_abs_max(out_iv)) * op_unit(op) / U
 
     if op == 'neg':
         return errs[0].scaled(-1.0), out_iv
@@ -63,42 +81,45 @@ def symbolic_error(tree, domain):
         return (errs[0] - errs[1]).with_rounding(key, mag), out_iv
     if op == '*':
         a, b = ivs
-        form = errs[0].scaled(iv_abs_max(b)) + errs[1].scaled(iv_abs_max(a))
+        form = (errs[0].scaled(iv_abs_max(b), (key, 'mulL'))
+                + errs[1].scaled(iv_abs_max(a), (key, 'mulR')))
         return form.with_rounding(key, mag), out_iv
     if op == 'fma':
         a, b = ivs[0], ivs[1]
-        form = errs[0].scaled(iv_abs_max(b)) + errs[1].scaled(iv_abs_max(a)) + errs[2]
+        form = (errs[0].scaled(iv_abs_max(b), (key, 'fmaL'))
+                + errs[1].scaled(iv_abs_max(a), (key, 'fmaR')) + errs[2])
         return form.with_rounding(key, mag), out_iv
     if op == '/':
         a, b = ivs
         bmin = iv_abs_min(b)
         if bmin == 0.0:
             return None, None
-        form = errs[0].scaled(1.0 / bmin) + errs[1].scaled(iv_abs_max(a) / (bmin * bmin))
+        form = (errs[0].scaled(1.0 / bmin, (key, 'divN'))
+                + errs[1].scaled(iv_abs_max(a) / (bmin * bmin), (key, 'divD')))
         return form.with_rounding(key, mag), out_iv
     if op == 'sqrt':
         amin = iv_abs_min(ivs[0])
         if amin <= 0.0:
             return None, None
-        return errs[0].scaled(1.0 / (2.0 * math.sqrt(amin))).with_rounding(key, mag), out_iv
+        return errs[0].scaled(1.0 / (2.0 * math.sqrt(amin)), (key, 'sqrt')).with_rounding(key, mag), out_iv
     if op == 'exp':
-        return errs[0].scaled(iv_abs_max(out_iv)).with_rounding(key, mag), out_iv
+        return errs[0].scaled(iv_abs_max(out_iv), (key, 'exp')).with_rounding(key, mag), out_iv
     if op == 'log':
         amin = iv_abs_min(ivs[0])
         if amin <= 0.0:
             return None, None
-        return errs[0].scaled(1.0 / amin).with_rounding(key, mag), out_iv
+        return errs[0].scaled(1.0 / amin, (key, 'un')).with_rounding(key, mag), out_iv
     if op == 'expm1':
         top = iv_abs_max(ivs[0])
         if top > 709.78:
             return None, None
-        return errs[0].scaled(math.exp(top)).with_rounding(key, mag), out_iv
+        return errs[0].scaled(math.exp(top), (key, 'un')).with_rounding(key, mag), out_iv
     if op == 'log1p':
         a = ivs[0]
         dmin = iv_abs_min((1.0 + a[0], 1.0 + a[1]))
         if dmin == 0.0:
             return None, None
-        return errs[0].scaled(1.0 / dmin).with_rounding(key, mag), out_iv
+        return errs[0].scaled(1.0 / dmin, (key, 'un')).with_rounding(key, mag), out_iv
     if op == 'hypot':
         return (errs[0] + errs[1]).with_rounding(key, mag), out_iv
     return None, None
