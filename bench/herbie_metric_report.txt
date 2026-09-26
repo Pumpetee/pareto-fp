@@ -7,10 +7,10 @@ poly             0.328     0.267     0.267   tie
 two_div          0.254     0.189     0.220   tie
 div_chain        0.267     0.255     0.267   tie
 log_ratio        0.344     0.064     0.064   tie
-exp_sum          0.352     0.352     0.216   HERBIE BETTER
+exp_sum          0.352     0.216     0.216   tie
 sq_diff         16.476     0.122     0.122   tie
 
-ours better on 1, tie on 5, Herbie better on 1 out of 7 cases.
+ours better on 1, tie on 6, Herbie better on 0 out of 7 cases.
 
 Forms compared:
   diff_sqrt
@@ -29,8 +29,8 @@ Forms compared:
     ours  : log((a / b))
     herbie: -log((b / a))
   exp_sum
-    ours  : (exp(b) * exp(a))
+    ours  : sqrt((exp((a + a)) * exp((b + b))))
     herbie: sqrt((exp((a + a)) * exp((b + b))))
   sq_diff
-    ours  : fma(x, (x - y), (y * (x - y)))
+    ours  : fma(x, (x - y), ((x - y) * y))
     herbie: fma(x, (x - y), ((x - y) * y))
