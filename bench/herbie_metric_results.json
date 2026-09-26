@@ -7,7 +7,7 @@
    "worst_bits": 29.960116903069135
   },
   "ours": {
-   "form": "(1 / (sqrt(x) + sqrt((1 + x))))",
+   "form": "(1 / (sqrt(x) + sqrt((x + 1))))",
    "mean_bits": 0.31930225625468744,
    "worst_bits": 1.584962500721156
   },
@@ -25,8 +25,8 @@
    "worst_bits": 1.584962500721156
   },
   "ours": {
-   "form": "fma(x, fma(fma(x, 4.5, 3.5), x, 2.5), 1.5)",
-   "mean_bits": 0.2828349625007212,
+   "form": "fma(fma(4.5, x, 3.5), (x * x), (1.5 + (x * 2.5)))",
+   "mean_bits": 0.2671887218755409,
    "worst_bits": 1.584962500721156
   },
   "herbie": {
@@ -43,8 +43,8 @@
    "worst_bits": 1.0
   },
   "ours": {
-   "form": "((a / c) + (b / c))",
-   "mean_bits": 0.25425,
+   "form": "((a + b) / c)",
+   "mean_bits": 0.18925,
    "worst_bits": 1.0
   },
   "herbie": {
@@ -61,8 +61,8 @@
    "worst_bits": 1.0
   },
   "ours": {
-   "form": "((a / b) / c)",
-   "mean_bits": 0.267,
+   "form": "((a / c) / b)",
+   "mean_bits": 0.25475,
    "worst_bits": 1.0
   },
   "herbie": {
@@ -97,7 +97,7 @@
    "worst_bits": 1.584962500721156
   },
   "ours": {
-   "form": "(exp(a) * exp(b))",
+   "form": "(exp(b) * exp(a))",
    "mean_bits": 0.3516511281273437,
    "worst_bits": 1.584962500721156
   },

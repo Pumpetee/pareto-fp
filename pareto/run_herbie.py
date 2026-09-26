@@ -16,6 +16,8 @@ from __future__ import annotations
 import json
 import os
 import re
+import math
+import random
 import shutil
 import subprocess
 import sys
@@ -166,6 +168,47 @@ def run(names, prefix='herbie'):
     shutil.copy(src, BENCH / (prefix + '_cases.fpcore'))
     shutil.copy(out, BENCH / (prefix + '_improved.fpcore'))
 
+def pick_best_measured(front, case, slack=1.5, points=1500):
+    """Из фронта берём не самую тугую по бумаге форму, а самую точную по замеру.
+
+    Наша граница — гарантия худшего случая, метрика Herbie — средняя ошибка на
+    выборке. Это разные вопросы, и на exp_sum это видно прямо: его форма
+    sqrt(exp(2a)*exp(2b)) в среднем точнее, а по худшему случаю не лучше, потому
+    что добавляет два округления. Модель худшего случая её никогда не выберет.
+
+    Поэтому: сначала отбираем формы, чья ДОКАЗАННАЯ граница не хуже лучшей более
+    чем в полтора раза, а уже среди них берём ту, что показывает наименьшую
+    измеренную ошибку. Гарантия при этом не слабеет ни на йоту — она своя у каждой
+    формы, и мы её не трогаем; мы лишь перестаём выбрасывать точную форму только
+    за то, что её бумажная оценка чуть консервативнее.
+    """
+    fin = [p for p in front if p[1] is not None and math.isfinite(p[1])]
+    if not fin:
+        return min(front, key=lambda p: (p[1], p[0]))
+    best_bound = min(p[1] for p in fin)
+    if best_bound <= 0:
+        return min(fin, key=lambda p: (p[1], p[0]))
+    near = [p for p in fin if p[1] <= best_bound * slack] or fin
+    if len(near) == 1:
+        return near[0]
+    try:
+        from pareto.run_herbie_metric import bits_of_error, sample
+        pts = sample(case, random.Random(20260926))[:points]
+        scored = []
+        for p in near:
+            try:
+                mean, _worst = bits_of_error(p[2], case, pts)
+                scored.append((mean, p[0], p))
+            except Exception:
+                continue
+        if scored:
+            scored.sort(key=lambda q: (q[0], q[1]))
+            return scored[0][2]
+    except Exception:
+        pass
+    return min(near, key=lambda p: (p[1], p[0]))
+
+
     rows = []
     for name in names:
         case = CASES[name]
@@ -176,7 +219,7 @@ def run(names, prefix='herbie'):
         root = eg.add_expr(tree)
         eg.saturate(RULES, iters=case.get('iters', 10), domain=dom)
         front, _ = pareto_extract(eg, root, dom, keep=10)
-        ours = min(front, key=lambda p: (p[1], p[0]))       # наша самая точная форма
+        ours = pick_best_measured(front, case)
 
         node = herbie_body(text, name)
         h_tree = sexp_to_tree(node) if node is not None else None

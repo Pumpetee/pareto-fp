@@ -1,31 +1,31 @@
-;; seed: 1735455919
+;; seed: 303555338
 
 (FPCore (x)
   :name "diff_sqrt"
   :precision binary64
   :pre (and (<= 1000000 x) (<= x 1000000000))
   :spec (- (sqrt (+ x 1)) (sqrt x))
-  (/ 1.0 (+ (/ 1.0 (/ (sqrt x) x)) (sqrt (+ 1.0 x)))))
+  (/ 1.0 (/ (fma (sqrt (+ 1.0 x)) (sqrt x) x) (sqrt x))))
 (FPCore (x)
   :name "poly"
   :precision binary64
   :pre (and (<= 1/2 x) (<= x 2))
   :spec (+ (+ (+ 3/2 (* 5/2 x)) (* 7/2 (* x x))) (* 9/2 (* x (* x x))))
-  (fma (* x x) (fma 4.5 x 3.5) (+ 1.5 (* 2.5 x))))
+  (fma x (fma 3.5 x 2.5) (fma (* (* 4.5 x) x) x 1.5)))
 (FPCore (a c b)
   :name "two_div"
   :precision binary64
   :pre (and (and (and (<= 1 a) (<= a 2)) (and (<= 3 c) (<= c 4)))
      (and (<= 1 b) (<= b 2)))
   :spec (+ (/ a c) (/ b c))
-  (fma b (/ 1.0 c) (/ a c)))
+  (/ (fma (/ (fmax a b) c) c (fmin a b)) c))
 (FPCore (a b c)
   :name "div_chain"
   :precision binary64
   :pre (and (and (and (<= 1 a) (<= a 2)) (and (<= 3 b) (<= b 4)))
      (and (<= 5 c) (<= c 6)))
   :spec (/ (/ a b) c)
-  (/ (/ a b) c))
+  (/ a (* b c)))
 (FPCore (a b)
   :name "log_ratio"
   :precision binary64
@@ -44,4 +44,4 @@
   :pre (and (and (<= 1000 x) (<= x 1000001/1000))
      (and (<= 999999/1000 y) (<= y 1000)))
   :spec (- (* x x) (* y y))
-  (fma x (- x y) (* (- x y) y)))
+  (fma y (- x y) (* (- x y) x)))

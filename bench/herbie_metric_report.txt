@@ -3,9 +3,9 @@ Reference: 60-digit Decimal evaluation of the original expression, rounded to do
 
 case          original      ours    herbie   verdict
 diff_sqrt       27.197     0.319     0.370   ours better
-poly             0.328     0.283     0.267   tie
-two_div          0.254     0.254     0.220   tie
-div_chain        0.267     0.267     0.267   tie
+poly             0.328     0.267     0.267   tie
+two_div          0.254     0.189     0.220   tie
+div_chain        0.267     0.255     0.267   tie
 log_ratio        0.344     0.064     0.064   tie
 exp_sum          0.352     0.352     0.216   HERBIE BETTER
 sq_diff         16.476     0.122     0.122   tie
@@ -14,22 +14,22 @@ ours better on 1, tie on 5, Herbie better on 1 out of 7 cases.
 
 Forms compared:
   diff_sqrt
-    ours  : (1 / (sqrt(x) + sqrt((1 + x))))
+    ours  : (1 / (sqrt(x) + sqrt((x + 1))))
     herbie: (1 / ((1 / (sqrt(x) / x)) + sqrt((1 + x))))
   poly
-    ours  : fma(x, fma(fma(x, 4.5, 3.5), x, 2.5), 1.5)
+    ours  : fma(fma(4.5, x, 3.5), (x * x), (1.5 + (x * 2.5)))
     herbie: fma((x * x), fma(4.5, x, 3.5), (1.5 + (2.5 * x)))
   two_div
-    ours  : ((a / c) + (b / c))
+    ours  : ((a + b) / c)
     herbie: fma(b, (1 / c), (a / c))
   div_chain
-    ours  : ((a / b) / c)
+    ours  : ((a / c) / b)
     herbie: ((a / b) / c)
   log_ratio
     ours  : log((a / b))
     herbie: -log((b / a))
   exp_sum
-    ours  : (exp(a) * exp(b))
+    ours  : (exp(b) * exp(a))
     herbie: sqrt((exp((a + a)) * exp((b + b))))
   sq_diff
     ours  : fma(x, (x - y), (y * (x - y)))
