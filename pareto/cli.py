@@ -5,6 +5,13 @@
     python -m pareto.cli "x*x - y*y" --domain x=1..2 --domain y=1..2 --json
     python -m pareto.cli --file kernel.c --function turbine1
     python -m pareto.cli "x*x - y*y" --domain x=1..2 --domain y=1..2 --target 1e-14
+    python -m pareto.cli --file kernel.c --function turbine1 --require 1e-13
+    python -m pareto.cli --file kernel.c --function turbine1 -o kernel_fast.c
+
+Коды возврата. Обычный прогон — 0, ошибка в аргументах или в разборе — 64. При
+`--require` код возврата и есть ответ, поэтому он различает три исхода: 0 —
+требование держится как написано, 1 — как написано не держится, но найденная
+форма держит, 2 — не держит ни одна найденная форма.
 
 Нужен только Python: ни node, ни clang. Компилятор участвует лишь в замерах
 (`pareto/run_fairbench.py`), здесь считается модель.
@@ -22,11 +29,25 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from pareto import budget as _budget
-from pareto.api import (analyse_c_function, analyse_expression, precision_report,
-                        rewritten_c)
+from pareto.api import (analyse_c_function, analyse_expression, check_requirement,
+                        precision_report, rewritten_c)
+from pareto.apply import rewrite_source, unified_diff
 from pareto.cfront import CParseError
 from pareto.parser import ParseError, parse, variables
 from pareto.program import ProgramError
+
+
+EX_USAGE = 64   # sysexits.h: ошибка в том, о чём попросили, а не ответ на вопрос
+
+
+def die(message):
+    """Пользовательская ошибка: сообщение в stderr, код 64.
+
+    Не 1 и не 2, потому что оба заняты ответом `--require`: скрипт сборки обязан
+    отличать «требование не держится» от «ты опечатался во флаге».
+    """
+    sys.stderr.write('pareto-fp: error: {}\n'.format(message))
+    raise SystemExit(EX_USAGE)
 
 
 def parse_domain(items, vars_=(), required=True):
@@ -34,17 +55,17 @@ def parse_domain(items, vars_=(), required=True):
     dom = {}
     for it in items or []:
         if '=' not in it or '..' not in it:
-            raise SystemExit('a range is written as x=1..2, got: ' + it)
+            die('a range is written as x=1..2, got: ' + it)
         name, rng = it.split('=', 1)
         lo, hi = rng.split('..', 1)
         try:
             dom[name.strip()] = (float(lo), float(hi))
         except ValueError:
-            raise SystemExit('range bounds must be numbers: ' + it)
+            die('range bounds must be numbers: ' + it)
     if required:
         missing = [v for v in vars_ if v not in dom]
         if missing:
-            raise SystemExit('no range given for: {}. Example: --domain {}=1..2'.format(
+            die('no range given for: {}. Example: --domain {}=1..2'.format(
                 ', '.join(missing), missing[0]))
     return dom
 
@@ -198,12 +219,33 @@ def main(argv=None):
     ap.add_argument('--no-refine', action='store_true',
                     help='skip domain branching (faster, looser bound)')
     ap.add_argument('--json', action='store_true', help='machine-readable output')
+    ap.add_argument('--require', type=float, default=None, metavar='BOUND',
+                    help='check that the error provably stays under this value and say so '
+                         'with the exit code: 0 the code as written already does, 1 it does '
+                         'not but the rewritten form does, 2 no form found does. This is the '
+                         'mode for a build or a pre-commit check')
+    ap.add_argument('-o', '--output', metavar='PATH',
+                    help='write the whole file with the rewritten function body into PATH '
+                         '(- for stdout). The same path as the input means in place. '
+                         'Everything else in the file is kept byte for byte')
+    ap.add_argument('--diff', action='store_true',
+                    help='print the change to the file as a unified diff instead of a report')
+    # Ошибка в аргументах не должна выглядеть как ответ проверки: у `--require`
+    # код 2 означает «требование недостижимо», и путать его с опечаткой в флаге
+    # нельзя. Поэтому пользовательские ошибки уходят на 64 (EX_USAGE).
+    def _error(message):
+        ap.print_usage(sys.stderr)
+        ap.exit(EX_USAGE, '{}: error: {}\n'.format(ap.prog, message))
+
+    ap.error = _error
     a = ap.parse_args(argv)
 
     if not a.expr and not a.file:
         ap.error('give an expression or --file PATH')
     if a.expr and a.file:
         ap.error('give either an expression or --file, not both')
+    if (a.output or a.diff) and not a.file:
+        ap.error('--output and --diff rewrite a file, so they need --file PATH')
 
     # Часы по умолчанию есть, и это решение в пользу человека, а не в пользу цифры.
     # Полный прогон отдельных задач FPBench занимает минуты, и первый запуск на своём
@@ -222,11 +264,33 @@ def main(argv=None):
     return _run_expr(a)
 
 
+def render_requirement(q):
+    """Вердикт проверки. Формулировки нарочно без «ошибка равна»: речь о границе."""
+    out = ['', 'Requirement: error must provably stay under {:.3e}'.format(q['required'])]
+    out.append('  as written  : {:.3e}{}'.format(
+        q['as_written'], '   MET' if q['verdict'] == 'met' else '   NOT MET'))
+    if q['verdict'] == 'met':
+        out.append('verdict: met as written, nothing to change')
+        return out
+    out.append('  rewritten   : {:.3e}{}'.format(
+        q['rewritten'], '   MET' if q['verdict'] == 'needs_rewrite' else '   NOT MET'))
+    if q['verdict'] == 'needs_rewrite':
+        out.append('verdict: not met as written; the rewritten form meets it')
+        if q.get('form'):
+            out.append('           ' + q['form'])
+    else:
+        out.append('verdict: no form found meets it. Either the requirement is below what '
+                   'this arithmetic can')
+        out.append('           deliver on these ranges, or the ranges are wider than the '
+                   'code really sees')
+    return out
+
+
 def _run_expr(a):
     try:
         tree = parse(a.expr)
     except ParseError as e:
-        raise SystemExit('could not parse the expression: {}'.format(e))
+        die('could not parse the expression: {}'.format(e))
     dom = parse_domain(a.domain, variables(tree))
 
     r = analyse_expression(tree, dom, keep=a.keep, iters=a.iters, budget=a.budget,
@@ -234,8 +298,26 @@ def _run_expr(a):
     if a.precision or a.target is not None:
         r['precision'] = precision_report(tree, dom, target=a.target)
     r['cut'] = _budget.cut_stages()
-    print(json.dumps(r, ensure_ascii=False, indent=2) if a.json else render(r))
-    return 0
+
+    code = 0
+    if a.require is not None:
+        # Для проверки берём САМУЮ тугую границу на фронте, а не ту форму, которую
+        # инструмент предложил бы по умолчанию: вопрос звучит «можно ли вообще это
+        # доказать», и отвечать на него формой, выбранной по компромиссу с
+        # быстродействием, было бы подменой вопроса.
+        best = min(r['front'], key=lambda x: x['err'])
+        r['requirement'] = check_requirement(a.require, r['base']['err'], best['err'],
+                                             best_form=best['c'])
+        code = r['requirement']['exit_code']
+
+    if a.json:
+        print(json.dumps(r, ensure_ascii=False, indent=2))
+    else:
+        text = render(r)
+        if r.get('requirement'):
+            text += '\n' + '\n'.join(render_requirement(r['requirement']))
+        print(text)
+    return code
 
 
 def _run_file(a):
@@ -243,13 +325,13 @@ def _run_file(a):
     try:
         src = path.read_text(encoding='utf-8')
     except OSError as e:
-        raise SystemExit('cannot read {}: {}'.format(path, e))
+        die('cannot read {}: {}'.format(path, e))
 
     if a.list:
         from pareto.cfront import functions, read_domains
         names = functions(src)
         if not names:
-            raise SystemExit('no function returning double or float found in ' + str(path))
+            die('no function returning double or float found in ' + str(path))
         doms = read_domains(src)
         print('functions in {}: {}'.format(path.name, ', '.join(names)))
         if doms:
@@ -264,8 +346,18 @@ def _run_file(a):
         r = analyse_c_function(src, a.function, dom=dom, keep=a.keep, iters=a.iters,
                                refine=not a.no_refine)
     except (CParseError, ProgramError) as e:
-        raise SystemExit('cannot analyse this function: {}'.format(e))
+        die('cannot analyse this function: {}'.format(e))
     r['cut'] = _budget.cut_stages()
+
+    code = 0
+    if a.require is not None:
+        r['requirement'] = check_requirement(a.require, r['base_bound'], r['best_bound'])
+        code = r['requirement']['exit_code']
+
+    new_src = notes = None
+    if a.output or a.diff:
+        new_src, notes = rewrite_source(src, r)
+
     if a.json:
         printable = dict(r)
         printable['paths'] = [{k: v for k, v in p.items()
@@ -273,10 +365,40 @@ def _run_file(a):
         printable['divergence'] = [{'paths': d['paths'], 'gap': d['gap'],
                                     'boxes': d['boxes']} for d in r['divergence']]
         printable['result_c'] = rewritten_c(r)
+        if new_src is not None:
+            printable['rewritten_file'] = new_src
+            printable['notes'] = notes
         print(json.dumps(printable, ensure_ascii=False, indent=2))
-    else:
-        print(render_function(r))
-    return 0
+        return code
+
+    if a.diff:
+        d = unified_diff(src, new_src, path=str(path))
+        print(d if d.strip() else 'no change: the function is already in its best form')
+        for n in notes:
+            print('note: ' + n)
+        if a.output is None:
+            return code
+
+    if a.output:
+        if a.output == '-':
+            sys.stdout.write(new_src)
+        else:
+            out = Path(a.output)
+            try:
+                out.write_text(new_src, encoding='utf-8')
+            except OSError as e:
+                die('cannot write {}: {}'.format(out, e))
+            for n in notes:
+                print('note: ' + n)
+            print('wrote {} with the body of {} rewritten; the rest of the file is '
+                  'unchanged'.format(out, r['function']))
+        return code
+
+    text = render_function(r)
+    if r.get('requirement'):
+        text += '\n' + '\n'.join(render_requirement(r['requirement']))
+    print(text)
+    return code
 
 
 if __name__ == '__main__':

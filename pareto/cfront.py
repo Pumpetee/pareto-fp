@@ -676,11 +676,17 @@ def parse_function(src, name=None):
 
     stmts = _finish_returns(stmts, ret_fmt)
     return {'name': fname, 'result': ret_fmt, 'args': args, 'order': order,
-            'stmts': stmts, 'domains': read_domains(src, before=chosen.start())}
+            'stmts': stmts, 'domains': read_domains(src, before=chosen.start()),
+            'body_span': body_span(src, chosen.end() - 1), 'line': line0}
 
 
-def _body_text(src, brace_pos):
-    """Текст тела функции вместе с фигурными скобками, по балансу скобок."""
+def body_span(src, brace_pos):
+    """Границы тела функции в исходнике: от `{` до парной `}` включительно.
+
+    Нужны не разбору, а обратной записи: чтобы вставить переписанное тело в файл
+    пользователя, надо знать, какие именно байты заменять. Всё остальное в файле —
+    комментарии, includes, соседние функции — остаётся при этом дословно на месте.
+    """
     depth = 0
     i = brace_pos
     n = len(src)
@@ -691,12 +697,18 @@ def _body_text(src, brace_pos):
         elif c == '}':
             depth -= 1
             if depth == 0:
-                return src[brace_pos:i + 1]
+                return (brace_pos, i + 1)
         elif c == '"' or c == "'":
             raise CParseError('the function body contains a string or character literal; '
                               'that is outside the numeric subset')
         i += 1
     raise CParseError('the function body has no matching closing brace')
+
+
+def _body_text(src, brace_pos):
+    """Текст тела функции вместе с фигурными скобками, по балансу скобок."""
+    lo, hi = body_span(src, brace_pos)
+    return src[lo:hi]
 
 
 def _finish_returns(stmts, ret_fmt):

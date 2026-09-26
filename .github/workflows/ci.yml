@@ -45,6 +45,33 @@ jobs:
       - name: mixed precision and the format tuner
         run: |
           python -m pareto.cli "0.5*m*v*v + m*9.81*h" --domain m=1..2 --domain v=0..30 --domain h=0..100 --target 1e-3
+
+      # `--require` отвечает КОДОМ ВОЗВРАТА, а не текстом: на него смотрит чужой
+      # скрипт сборки. Значит проверять надо именно код, и проверять на всех трёх
+      # системах — оболочки по-разному обращаются с ним ровно так же охотно, как
+      # с кодировками.
+      - name: the requirement mode must answer with its exit code
+        shell: bash
+        run: |
+          set -u
+          fails=0
+          check () {
+            want=$1; shift
+            python -m pareto.cli "$@" > /dev/null 2>&1 && got=0 || got=$?
+            if [ "$got" != "$want" ]; then
+              echo "expected exit $want, got $got: $*"; fails=$((fails+1))
+            fi
+          }
+          D1="--domain x=1000..1000.001"
+          D2="--domain y=999.999..1000"
+          # Граница как написано 1.16e-10, у переписанной формы 3.33e-16.
+          check 0 "x*x - y*y" $D1 $D2 --time-budget 20 --require 1e-9
+          check 1 "x*x - y*y" $D1 $D2 --time-budget 20 --require 1e-12
+          check 2 "x*x - y*y" $D1 $D2 --time-budget 20 --require 1e-30
+          # Опечатка в аргументах не имеет права выглядеть как вердикт проверки.
+          check 64 "x*x - y*y" --domain nonsense
+          check 64 "x*x - y*y" $D1 $D2 --diff
+          [ "$fails" = 0 ]
       - name: the ready-to-run single file must build and work
         run: |
           python tools/build_release.py
@@ -69,6 +96,33 @@ jobs:
         run: |
           uname -m
           clang --version
+      # Файл, который инструмент отдал человеку, обязан СОБИРАТЬСЯ. Это не
+      # придирка: первая же версия обратной записи выдала файл без `#include
+      # <math.h>`, и он не компилировался — выглядело это как поломка инструмента,
+      # а не как забытый заголовок. Компилятор здесь уже есть, поэтому проверка
+      # стоит ровно там, где ничего не стоит.
+      - name: every rewritten example must compile
+        shell: bash
+        run: |
+          set -eu
+          mkdir -p rewritten
+          while read -r file fn; do
+            out="rewritten/$(basename "${file%.c}")_$fn.c"
+            python -m pareto.cli --file "$file" --function "$fn" -o "$out" --time-budget 30
+            clang -c -O2 -std=c11 -Wall -Werror=implicit-function-declaration \
+                  -o /dev/null "$out"
+            echo "compiled $out"
+          done <<'CASES'
+          examples/branch_sqrt.c safe_diff_sqrt
+          examples/branch_sqrt.c expm1_guard
+          examples/branch_sqrt.c jumpy
+          examples/mixed_precision.c energy
+          examples/newton_loop.c sqrt_newton
+          examples/rosa_turbine.c turbine1
+          examples/rosa_turbine.c turbine2
+          examples/rosa_turbine.c turbine3
+          CASES
+
       - name: fair benchmark against -O3 and -ffast-math
         run: python pareto/run_fairbench.py
       - name: how loose the proven bound is

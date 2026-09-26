@@ -264,6 +264,46 @@ binary32; in `a*2.0` it happens in binary64, because the literal is a double;
 `float` function rounds. `0.1f` is not one tenth, it is the nearest binary32 value,
 and it is stored as that.
 
+## Back into the file, and a verdict instead of a report
+
+Two steps separate a tool that tells you something from a tool you can use. Both are
+small and neither is interesting, which is exactly why they get skipped.
+
+**The result goes back into the source.** `pareto/apply.py` replaces the bytes between
+the opening brace of the chosen function and its matching brace, and nothing else in
+the file. The span comes from the same parse that produced the analysis
+(`cfront.body_span`), so the text that is replaced is the text that was analysed — not
+a second guess made by a regular expression over the file. The signature is not
+touched, so the change does not propagate to callers, and comments, includes,
+neighbouring functions and line endings survive byte for byte.
+
+The one thing that is added is `#include <math.h>`, when the rewritten body calls
+something from it and the file has no direct include of its own. The first version of
+this rule was narrower — add it only if the rewrite *introduced* a call the original
+body did not have — and it was wrong: a file that already called `sqrt` with no header
+came out of the tool as broken as it went in, and it read as our defect rather than
+its own. The check that caught it is now in CI: every example is rewritten and the
+result is compiled. A file we hand someone has to build, and that is a machine's
+question, not a judgement call.
+
+There is a round-trip test for the substance rather than the formatting
+(`tests/test_apply.py`): analyse, rewrite, write out, read the written file back, and
+require the bound of what was written to equal the bound that was promised. Without
+it, "the rewritten form holds 1e-16" would be a statement about a tree in memory, and
+the file on disk would be taking it on faith.
+
+**The answer is an exit code.** `--require X` asks whether the error provably stays
+under `X` and says so with the code it exits with: `0` the code as written already
+does, `1` it does not but a form we found does, `2` nothing found does, `64` the
+arguments made no sense. Three verdicts rather than two, because the middle one is the
+common case and carries a fix — collapsing it into "failed" throws away the only part
+that is actionable. And `64` rather than `1` for a bad flag, because a typo must not
+be able to impersonate a statement about someone's code; every user error in the CLI
+goes through one function (`cli.die`) for that reason alone.
+
+An infinite bound is a `2`, not a large number. "Could not prove it" and "the error is
+huge" are different claims, and only one of them is ours.
+
 ## The bound is tested, not asserted
 
 `tests/test_bound.py` rebuilds the Pareto front and checks, on every form it finds, that the error actually measured against a 60-digit `Decimal` reference never exceeds the bound the analysis proved. Inputs are drawn pseudo-randomly with a fixed seed plus the domain corners — deliberately not a uniform grid, since cancellation lives in narrow spots a grid can step over.

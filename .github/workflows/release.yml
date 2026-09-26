@@ -64,6 +64,14 @@ jobs:
           if [ "${{ runner.os }}" = "Windows" ]; then BIN=dist/pareto-fp.exe; fi
           "$BIN" --file examples/rosa_turbine.c --list
           "$BIN" --file examples/rosa_turbine.c --function turbine1
+          # То, ради чего инструмент ставят в сборку: вердикт кодом возврата и
+          # переписанный файл на диске. Если это работает только из исходников,
+          # а в отдаваемом бинарнике нет, то отдаём мы не тот инструмент.
+          "$BIN" --file examples/rosa_turbine.c --function turbine1 \
+                 --require 1e-3 --time-budget 20
+          "$BIN" --file examples/branch_sqrt.c --function safe_diff_sqrt \
+                 -o rewritten.c --time-budget 20
+          grep -q 'double safe_diff_sqrt' rewritten.c
       - name: name the asset after the system it was built on
         shell: bash
         run: |

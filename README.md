@@ -1,6 +1,6 @@
-# pareto-fp (research)
+# pareto-fp
 
-Takes a floating-point expression, or a whole function out of a C file, and rewrites it into an equivalent one that is more accurate, often faster, and comes with a **proven upper bound on the error**.
+Takes a floating-point expression, or a whole function out of a C file, and rewrites it into an equivalent one that is more accurate, often faster, and comes with a **proven upper bound on the error**. It writes the result back into your file, and it will tell you with its exit code whether your error requirement holds — so it can sit in a build and not only in a terminal.
 
 Today a compiler gives you two options: keep the exact order of operations and stay slow, or turn on `-ffast-math` and get speed with no guarantees at all. There is nothing in between. This tool builds the Pareto front over *cost* and *provable error bound*, and lets you pick a point on it.
 
@@ -131,6 +131,46 @@ What the tool does **not** claim: that narrow precision is faster. On scalar x86
 
 A loop with a known trip count is unrolled and then analysed as straight-line code. Unrolling is the only sound way this method knows to handle a loop, so the trip count has to be constant — a loop bounded by a variable is refused out loud rather than guessed at. Array reductions are a separate mode with bounds from Higham (`pareto/reductions.py`).
 
+### Writing the result back
+
+A tool that prints the better form and leaves you to retype it is a report, not something you use. `-o` writes the file out with the body of that one function replaced:
+
+```
+$ pareto-fp --file kernel.c --function safe_diff_sqrt -o kernel_fast.c
+note: added #include <math.h>, the file had none and the body calls sqrt.
+      Harmless if the header already arrives through another include
+wrote kernel_fast.c with the body of safe_diff_sqrt rewritten; the rest of the file is unchanged
+```
+
+Only the bytes between `{` and its matching `}` change. The signature is left alone, so callers do not move; comments, includes, neighbouring functions and line endings come through unchanged. `--diff` prints the change as a unified diff instead, `-o -` writes to stdout, and giving the input path as the output rewrites in place.
+
+The file it hands you has to compile, and that is checked by a compiler rather than assumed: CI rewrites every example and builds the result. The first version of this did not survive that check. It added `#include <math.h>` only when the rewrite introduced a call the original body did not have, so a file that already called `sqrt` without the header came out as broken as it went in — and it looked like the tool was broken, not the file.
+
+### Checking a requirement in your build
+
+`--require` turns the report into a check. One question — does the error provably stay under this value — answered with the exit code, so a build or a pre-commit hook can act on it without parsing anything:
+
+```
+$ pareto-fp --file examples/rosa_turbine.c --function turbine1 --require 1.5e-14 ; echo $?
+
+Requirement: error must provably stay under 1.500e-14
+  as written  : 1.671e-14   NOT MET
+  rewritten   : 1.341e-14   MET
+verdict: not met as written; the rewritten form meets it
+1
+```
+
+| exit | meaning |
+|---|---|
+| 0 | the code as written provably meets the requirement |
+| 1 | as written it does not, and a rewritten form does |
+| 2 | no form found meets it |
+| 64 | the arguments or the file could not be understood |
+
+Three verdicts and not two, because the middle one is the common case and it comes with a fix. A usage error is 64 on purpose: a typo in a flag must not read as a statement about the code.
+
+What is checked is the proven bound over the whole declared range. A tuner that samples inputs answers "it was fine on my tests", which is a different sentence, and the difference is the entire point of the exercise.
+
 ### Time
 
 `--time-budget` (30 seconds by default, `0` for no limit) puts a clock on the whole analysis. Cutting it short **only loosens the bound, it never makes it wrong**: every stage it skips would have offered a better candidate or a tighter estimate, never a valid one. Skipped stages are named in the output, so a loose answer never looks like a complete one. The clock is checked between stages and never in the middle of one, so the real time can exceed the target by the length of the stage in flight.
@@ -158,7 +198,7 @@ Twelve of the thirteen get a tighter bound; `verhulst` is already in its best fo
 
 **How loose the bound is.** Proven bound divided by the largest error measured over 600 random points plus the domain corners, across the 15 forms on the benchmark fronts: never below the measured error, from x1.44 to x664, **median x2.58**. A factor of two or three is the ordinary price of a worst-case guarantee; the outlier is a form whose real error is near zero.
 
-**How the bound is checked.** 102 tests. Property-based interval tests, and three separate fuzzers that generate random inputs and require the measured error to stay under the printed bound: one for plain binary64 expressions, one for expressions with binary32 and binary16 rounding sprinkled in at random, and one for whole programs with branches. Fuzzing found nine defects in the bound, two of them on the same day the bound was extended. The tenth was found by the work on conditionals rather than by a fuzzer, and it had been there since the first commit: the interval endpoints were computed in ordinary binary64 with no directed rounding, so an interval could come out **narrower** than the true range of values — and a narrow interval scales the error down, which is how a bound stops being a bound. Fixing it cost under 2% on the published bounds; the details are in [docs/how-it-works.md](docs/how-it-works.md).
+**How the bound is checked.** 115 tests. Property-based interval tests, a round trip through the file — rewrite, write out, read back, and require the bound of what was written to be the bound that was promised — and three separate fuzzers that generate random inputs and require the measured error to stay under the printed bound: one for plain binary64 expressions, one for expressions with binary32 and binary16 rounding sprinkled in at random, and one for whole programs with branches. Fuzzing found nine defects in the bound, two of them on the same day the bound was extended. The tenth was found by the work on conditionals rather than by a fuzzer, and it had been there since the first commit: the interval endpoints were computed in ordinary binary64 with no directed rounding, so an interval could come out **narrower** than the true range of values — and a narrow interval scales the error down, which is how a bound stops being a bound. Fixing it cost under 2% on the published bounds; the details are in [docs/how-it-works.md](docs/how-it-works.md).
 
 **Supported input.** Scalar `double` and `float` code over `+ - * /`, `sqrt`, `exp`, `log`, `fma`, `expm1`, `log1p`, `hypot`, integer `pow`, plus local variables, `if`/`else` with `&&` and `||`, and loops with a constant trip count. Array reductions are a separate mode. No pointers, no arrays with a computed index, no `while`, no calls to functions we have no bound for — those are refused with the line number, not approximated.
 
@@ -180,7 +220,9 @@ Twelve of the thirteen get a tighter bound; `verhulst` is already in its best fo
 
 ## Status
 
-Research prototype with reproducible numbers. It now reads a real file, which is the difference between a demo and something you can point at your own code, but it is not a compiler pass. Next, in order: the same rewriting as a real MLIR pass on the `arith` dialect instead of emitted modules, calibration of the cost model on the target machine, then an RFC on the LLVM Discourse.
+Usable tool, reproducible numbers, not a compiler pass. It reads a C file, writes the rewritten function back into it, and answers a requirement with an exit code — which is the whole distance between a demo and something you can put in a build. What it is not: a pass inside a compiler. The search takes seconds where a pass has microseconds, and the input is one scalar function at a time, not a translation unit.
+
+Next, in order: the same rewriting as a real MLIR pass on the `arith` dialect instead of emitted modules, calibration of the cost model on the target machine, then an RFC on the LLVM Discourse.
 
 Found a case where it helps, or where it fails? Open an issue with the function and the input ranges. The first few real-world cases will be analysed and published here in full.
 

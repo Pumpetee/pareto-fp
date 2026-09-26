@@ -114,6 +114,43 @@ def analyse_expression(text_or_tree, dom, keep=10, iters=10, budget=2.0,
     }
 
 
+# ---------- проверка требования ----------
+# Коды возврата. Значения выбраны так, чтобы скрипт сборки мог различить три
+# РАЗНЫХ исхода, а не только «получилось / не получилось»: между «код уже
+# удовлетворяет требованию» и «требование недостижимо ни в какой записи» лежит
+# третий случай, в котором есть готовое исправление, и он самый частый.
+MET = 0            # как написано, граница уже не превышает требование
+NEEDS_REWRITE = 1  # как написано — превышает, но найденная форма требование держит
+UNPROVABLE = 2     # ни одна найденная форма требования не держит
+
+
+def check_requirement(required, as_written, best, best_form=None):
+    """Держит ли код требование по ошибке. Ответ — вердикт и код возврата.
+
+    Требование проверяется по ДОКАЗАННОЙ верхней границе, а не по замеру на
+    выборке входов: замер отвечает «на этих входах обошлось», а в сборке нужен
+    ответ про все входы сразу.
+
+    Бесконечная граница — это «доказать не удалось», а не «ошибка огромна», и
+    она попадает в тот же исход, что и превышение: утверждать про такой код
+    нечего.
+    """
+    verdict = UNPROVABLE
+    if math.isfinite(as_written) and as_written <= required:
+        verdict = MET
+    elif math.isfinite(best) and best <= required:
+        verdict = NEEDS_REWRITE
+    return {
+        'required': required,
+        'as_written': as_written,
+        'rewritten': best,
+        'verdict': {MET: 'met', NEEDS_REWRITE: 'needs_rewrite',
+                    UNPROVABLE: 'unprovable'}[verdict],
+        'exit_code': verdict,
+        'form': best_form,
+    }
+
+
 # ---------- точность ----------
 def precision_report(tree, dom, target=None, formats=('float32', 'float16')):
     """Что известно про форматы: однородные варианты и подбор под цель.
@@ -175,6 +212,10 @@ def analyse_c_function(src, name=None, dom=None, keep=8, iters=8, refine=True,
     result['order'] = fn['order']
     result['domain'] = domain
     result['cut'] = _budget.cut_stages()
+    # Где эта функция лежит в тексте файла. Нужно тому, кто просит записать
+    # переписанное тело обратно в исходник, а не прочитать его в консоли.
+    result['body_span'] = fn['body_span']
+    result['line'] = fn['line']
     for p in result['paths']:
         p['expr_text'] = to_text(p['expr'])
         p['form_text'] = to_text(p['form'])

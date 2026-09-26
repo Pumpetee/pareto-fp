@@ -25,6 +25,8 @@
  *   pareto-fp --file examples/branch_sqrt.c --function jumpy
  */
 
+#include <math.h>
+
 /* Guard against cancellation. Both branches compute the same thing, so there is no
    jump at all, and the win is 1e4 times on the branch that had the cancellation. */
 // @domain x: 0.0 .. 1000000000.0

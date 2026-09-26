@@ -39,7 +39,7 @@ DIST = ROOT / 'dist'
 # только то, без чего утилита не посчитает: анализ, поиск, печать, разбор C,
 # программы с ветвлениями, эталон для самопроверки.
 PRODUCT_MODULES = (
-    'affine', 'analysis', 'api', 'budget', 'cfront', 'cli', 'codegen', 'eft',
+    'affine', 'analysis', 'api', 'apply', 'budget', 'cfront', 'cli', 'codegen', 'eft',
     'egraph', 'evalfp', 'exactref', 'fma_compat', 'mixed', 'parser', 'precision',
     'program', 'reductions', 'rules', 'symbolic_cost', 'symbolic_error', 'taylor',
     'to_mlir', 'toolchain',
