@@ -137,7 +137,7 @@ A loop with a known trip count is unrolled and then analysed as straight-line co
 
 ## What it measures about itself
 
-Numbers below are produced by `pareto/run_fpbench.py`, which CI re-runs on clean Linux and macOS machines and publishes as an artifact.
+Numbers below are produced by `pareto/run_fpbench.py`, which CI re-runs on clean Linux and macOS machines and publishes as an artifact. The run there is given a time budget far larger than any case needs, so the artifact is comparable to this table rather than a cheaper version of it.
 
 **Proven bounds on the FPBench rosa cases.** The bound for the expression as written, and for the form this tool returns:
 

@@ -79,7 +79,12 @@ jobs:
       # делает границу шире, но не делает её неверной.
       - name: proven bounds on the FPBench rosa cases
         env:
-          PARETO_TIME_BUDGET: '60'
+          # Часы стоят на задачу и специально ЗАВЕДОМО БОЛЬШЕ, чем нужно любой из
+          # них: иначе на медленном раннере уточнение у carbonGas срезалось бы, и
+          # артефакт CI печатал бы числа слабее тех, что стоят в README, — таблица
+          # перестала бы сходиться сама с собой. Здесь часы только страховка от
+          # зависшего прогона, а не режим экономии.
+          PARETO_TIME_BUDGET: '900'
         run: python pareto/run_fpbench.py
       - name: head-to-head on Herbie's own metric
         run: python pareto/run_herbie_metric.py
