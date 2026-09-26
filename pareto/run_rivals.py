@@ -314,9 +314,16 @@ def main(argv=None):
         print((BENCH / REPORT).read_text(encoding='utf-8'))
         return 0
     rows = []
+    # 26.09.2026: шаг очной ставки дважды умирал в CI молча — шестнадцать минут
+    # без единой строки, потом «раннер получил сигнал выключения». Без отметок
+    # невозможно сказать, на ком он умер: на нашем поиске, FPTaylor или Daisy.
+    def _note(m):
+        print(m, flush=True)
+
     for name in names:
         case = cases[name]
         domain = case['domain']
+        _note(f'[{name}] начал')
         rng = random.Random(SEED)
 
         t0 = time.perf_counter()
@@ -328,6 +335,7 @@ def main(argv=None):
         front, _ = pareto_extract(eg, root, domain, keep=8)
         front = refine_front(front, domain)
         search_sec = time.perf_counter() - t0
+        _note(f'[{name}] наш поиск: {search_sec:.1f} с')
 
         finite = [p for p in front if p[1] is not None and math.isfinite(p[1])]
         best = min(finite, key=lambda p: (p[1], p[0])) if finite else None
@@ -346,13 +354,17 @@ def main(argv=None):
             'search_sec': search_sec,
         }
 
+        _note(f'[{name}] FPTaylor по исходной')
         row['fptaylor_written'], row['fptaylor_written_status'] = \
             fptaylor_bound(name, case['expr'], domain)
+        _note(f'[{name}] Daisy по исходной')
         row['daisy_written'], row['daisy_written_status'] = \
             daisy_bound(name, case['expr'], domain)
         if pick is not None:
+            _note(f'[{name}] FPTaylor по нашей форме')
             row['fptaylor_ours'], row['fptaylor_ours_status'] = \
                 fptaylor_bound(name, pick[2], domain)
+            _note(f'[{name}] Daisy по нашей форме')
             row['daisy_ours'], row['daisy_ours_status'] = \
                 daisy_bound(name, pick[2], domain)
         else:
