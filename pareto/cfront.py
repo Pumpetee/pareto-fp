@@ -68,6 +68,8 @@ _TOKEN = re.compile(r"""
       (?P<ws>\s+)
     | (?P<lcomment>//[^\n]*)
     | (?P<bcomment>/\*.*?\*/)
+    | (?P<str>"(?:\\.|[^"\\])*")
+    | (?P<chr>'(?:\\.|[^'\\])*')
     | (?P<num>(?:\d+\.\d*|\.\d+|\d+)(?:[eE][+-]?\d+)?[fFlL]?)
     | (?P<name>[A-Za-z_][A-Za-z_0-9]*)
     | (?P<op><<=|>>=|<=|>=|==|!=|&&|\|\||\+\+|--|->|\+=|-=|\*=|/=|[-+*/%<>=(){};,!&|?:\[\].])
@@ -123,6 +125,20 @@ def _binary(op, a, b):
     """Обычное арифметическое преобразование C: шире из двух типов, и округление в него."""
     fmt = FLOAT64 if (a.fmt is FLOAT64 or b.fmt is FLOAT64) else a.fmt
     return Typed(_wrap((op, a.tree, b.tree), fmt), fmt)
+
+
+_DIAGNOSTIC = re.compile(
+    r"assert|abort|log|trace|print|warn|error|fatal|debug|check\b", re.I)
+
+
+def _is_diagnostic(name):
+    """Похоже ли имя на проверку или запись в журнал.
+
+    Нарочно по имени, а не по сигнатуре: отличить «эта функция ничего не меняет»
+    в общем случае нельзя, а список подозрительных слов проверяем и признаём его
+    узким. Любой другой незнакомый вызов остаётся отказом.
+    """
+    return bool(_DIAGNOSTIC.search(name))
 
 
 class _Parser:
@@ -236,7 +252,7 @@ class _Parser:
                 key = key + sep + self.take().text
             if key not in self.vars and key in self.consts:
                 return Typed(('num', float(self.consts[key])), FLOAT64)
-            if key not in self.vars and '->' in key and key.split('->', 1)[0] in self.opaque:
+            if key not in self.vars and ('->' in key or '.' in key) and                     re.split(r'->|\.', key)[0] in self.opaque:
                 # Поле непрозрачного объекта: величина есть, состав неизвестен.
                 self.vars[key] = (key, FLOAT64)
                 self.extra_inputs[key] = FLOAT64
@@ -271,6 +287,21 @@ class _Parser:
         # ему даёт контекст; для нашей арифметики это просто число.
         return Typed(('num', value), fmt)
 
+    def skip_statement(self):
+        depth = 0
+        while True:
+            t = self.peek()
+            if t.kind == 'eof':
+                return
+            if t.text in ('(', '{', '['):
+                depth += 1
+            elif t.text in (')', '}', ']'):
+                depth -= 1
+            elif t.text == ';' and depth <= 0:
+                self.take(';')
+                return
+            self.take()
+
     def opaque_local(self):
         """Локальный объект, полученный откуда-то, чего мы не разбираем.
 
@@ -286,6 +317,13 @@ class _Parser:
         """
         start = self.i
         tname = self.take().text
+        # Объявление может начинаться служебным словом: `struct cpContact *con = ...`.
+        # Само слово типом не является, настоящее имя идёт следом.
+        while tname in ('struct', 'union', 'const', 'static', 'volatile'):
+            if self.peek().kind != 'name':
+                self.i = start
+                return False
+            tname = self.take().text
         while self.at('*'):
             self.take('*')
         if self.peek().kind != 'name':
@@ -310,16 +348,30 @@ class _Parser:
         _expand(self.structs, tname, vname + '.', flat)
         _expand(self.structs, tname, vname + '->', flat)
         if not flat:
-            self.i = start
-            return False
+            # Тип непрозрачен: состав полей неизвестен. Величина всё равно есть,
+            # поэтому помечаем имя, а поля заведём лениво при первом обращении.
+            self.opaque.add(vname)
+            return True
         for key, fmt in flat.items():
             self.vars[key] = (key, fmt)
             self.extra_inputs[key] = fmt
         return True
 
     def struct_bases(self):
-        """Имена переменных-структур в текущей области: v, если известно v.x."""
-        return {k.split('.', 1)[0] for k in self.vars if '.' in k}
+        """Пути, за которыми стоит структура: v, если известно v.x, и con->r2,
+        если известно con->r2.x.
+
+        Структура приходит в вызов не только простым именем: в настоящем коде это
+        сплошь и рядом путь к полю — cpvsub(con->r2, con->r1). Раньше такой
+        аргумент не распознавался, и функция отвергалась из-за формы записи, а не
+        из-за существа.
+        """
+        out = set()
+        for k in self.vars:
+            for sep in ('.', '->'):
+                if sep in k:
+                    out.add(k.rsplit(sep, 1)[0])
+        return out
 
     def user_arg(self):
         """Аргумент пользовательского вызова: либо структура целиком, либо выражение.
@@ -328,11 +380,16 @@ class _Parser:
         только её поля. Поэтому `cpvdot(v, v)` читается как ссылка на набор полей,
         а не как попытка вычислить `v`.
         """
-        tok = self.peek()
-        if (tok.kind == 'name' and tok.text in self.struct_bases()
-                and self.peek(1).text in (',', ')')):
-            self.take()
-            return ('struct', tok.text)
+        bases = self.struct_bases()
+        start = self.i
+        if self.peek().kind == 'name':
+            path = self.take().text
+            while self.peek().text in ('.', '->') and self.peek(1).kind == 'name':
+                sep = self.take().text
+                path = path + sep + self.take().text
+            if path in bases and self.peek().text in (',', ')'):
+                return ('struct', path)
+            self.i = start
         return ('expr', self.expr())
 
     def inline(self, cal, raw, tok):
@@ -369,8 +426,12 @@ class _Parser:
                     raise CParseError('{} expects a struct for {!r}; pass the variable by '
                                       'name'.format(cal['name'], base), tok.line)
                 for f in fields:
-                    key = val + '.' + f
-                    if key not in self.vars:
+                    key = None
+                    for sep in ('.', '->'):
+                        if val + sep + f in self.vars:
+                            key = val + sep + f
+                            break
+                    if key is None:
                         raise CParseError('{!r} has no field {!r} here'.format(val, f),
                                           tok.line)
                     sub[base + '.' + f] = ('var', self.vars[key][0])
@@ -551,7 +612,20 @@ class _Parser:
             return self.assignment()
         if tok.text == '{':
             return self.block()
-        if tok.kind == 'name' and tok.text in self.structs and self.opaque_local():
+        if tok.kind == 'name' and (tok.text in self.structs
+                                   or (tok.text in ('struct', 'union', 'const')
+                                       and self.peek(1).kind == 'name')):
+            if self.opaque_local():
+                return []
+        if tok.kind in ('str', 'chr'):
+            raise CParseError('a string or character literal takes part in this statement; '
+                              'that is outside the numeric subset', tok.line)
+        if tok.kind == 'name' and self.peek(1).text == '(' and _is_diagnostic(tok.text):
+            # Вызов-проверка или вызов-лог отдельным оператором. Он не участвует в
+            # вычислении и значения наших величин не меняет, поэтому пропускаем.
+            # Узко и намеренно: любой ДРУГОЙ незнакомый вызов по-прежнему отказ,
+            # потому что он может писать по указателю, а память мы не моделируем.
+            self.skip_statement()
             return []
         raise CParseError('statement starting at {!r} is not supported'.format(tok.text),
                           tok.line)
@@ -1209,8 +1283,18 @@ def body_span(src, brace_pos):
             if depth == 0:
                 return (brace_pos, i + 1)
         elif c == '"' or c == "'":
-            raise CParseError('the function body contains a string or character literal; '
-                              'that is outside the numeric subset')
+            # Строка внутри тела — почти всегда текст проверки или лога, и к
+            # арифметике отношения не имеет. Раньше она отвергала функцию целиком
+            # (23 функции Chipmunk из 110). Здесь просто проходим её насквозь,
+            # чтобы не сбиться на скобках внутри кавычек; что делать с самим
+            # оператором, решает разбор ниже — и неизвестный вызов он по-прежнему
+            # отвергает.
+            quote = c
+            i += 1
+            while i < len(src) and src[i] != quote:
+                i += 2 if src[i] == chr(92) else 1
+            i += 1
+            continue
         i += 1
     raise CParseError('the function body has no matching closing brace')
 
