@@ -139,6 +139,7 @@ class _Parser:
         self.globs = globs or {}
         self.extra_inputs = {}
         self.structs = {}
+        self.opaque = set()
 
     # --- служебное ---
     def peek(self, k=0):
@@ -235,6 +236,10 @@ class _Parser:
                 key = key + sep + self.take().text
             if key not in self.vars and key in self.consts:
                 return Typed(('num', float(self.consts[key])), FLOAT64)
+            if key not in self.vars and '->' in key and key.split('->', 1)[0] in self.opaque:
+                # Поле непрозрачного объекта: величина есть, состав неизвестен.
+                self.vars[key] = (key, FLOAT64)
+                self.extra_inputs[key] = FLOAT64
             if key not in self.vars and key in self.globs:
                 # Глобальное состояние — свободная величина: регистрируем как вход
                 # и требуем диапазон наравне с аргументами.
@@ -1094,6 +1099,7 @@ def parse_function(src, name=None, types=None, table=None, resolve=None,
 
     args = {}
     order = []
+    opaque = set()
     if params and params != 'void':
         for part in params.split(','):
             # const и volatile на тип не влияют — убираем, иначе `const Vector3 v`
@@ -1111,10 +1117,24 @@ def parse_function(src, name=None, types=None, table=None, resolve=None,
                 # завышение — законная сторона. Запись через указатель отвергается
                 # отдельно: память мы не моделируем.
                 bits = [w for w in bits if w != '*']
-                if len(bits) != 2 or bits[0] not in table:
+                if len(bits) != 2:
                     raise CParseError(
-                        'function {} takes a pointer to {!r}, and that is not a struct '
-                        'declared in this project'.format(fname, ' '.join(bits[:-1])), line0)
+                        'function {} takes a pointer the shape of which is not readable here'
+                        .format(fname), line0)
+                if bits[0] in types or bits[0] in INT_TYPES:
+                    # Указатель на число — это массив или выходной параметр.
+                    # И то и другое мы не моделируем, отказ остаётся.
+                    raise CParseError(
+                        'function {} takes a pointer to a number: that is an array or an '
+                        'output parameter, and neither is modelled here'.format(fname), line0)
+                if bits[0] not in table:
+                    # Непрозрачный тип: объявлен вперёд, тело скрыто (cpSpace, b2World).
+                    # Полей мы не знаем, но код их читает, и каждое такое чтение —
+                    # неизвестная величина. Регистрируем лениво, при первом обращении:
+                    # так в список входов попадут ровно те поля, которые функция
+                    # действительно трогает, а не выдуманный нами состав структуры.
+                    opaque.add(bits[1])
+                    continue
                 flat = {}
                 _expand(table, bits[0], bits[1] + '->', flat)
                 for key, fmt in flat.items():
@@ -1152,6 +1172,7 @@ def parse_function(src, name=None, types=None, table=None, resolve=None,
     toks = tokenize(body)
     p = _Parser(toks, resolve=resolve, macros=macros, consts=consts, globs=globs)
     p.structs = table
+    p.opaque = opaque
     for a in order:
         p.vars[a] = (a, args[a])
     stmts = p.block()
