@@ -19,7 +19,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from pareto.cfront import CParseError, functions, parse_function
+from pareto.cfront import CParseError, collect_context, functions, parse_function
 
 SKIP_DIRS = {'.git', 'build', 'cmake', 'tests', 'test', 'examples', 'third_party',
              'external', 'vendor', 'docs', 'doc'}
@@ -59,6 +59,16 @@ def main():
              if p.suffix in ('.c', '.h')
              and not any(part in SKIP_DIRS for part in p.parts)]
 
+    # Типы и структуры собираются по ВСЕМУ дереву: объявления живут в заголовках,
+    # а разбираем мы .c. Без этого почти всё отвергается по причине «тип не
+    # объявлен здесь», и цифра охвата говорит о нашей слепоте, а не о коде.
+    types, table = collect_context(files)
+    extra = [t for t in types if t not in ('double', 'float', 'long double')]
+    print(f'вещественных типов найдено: {len(types)}'
+          + (f' (включая {", ".join(sorted(extra)[:5])})' if extra else ''))
+    print(f'структур найдено: {len(table)}')
+    print()
+
     ok, bad = [], []
     reasons = collections.Counter()
     seen = 0
@@ -69,7 +79,7 @@ def main():
         except OSError:
             continue
         try:
-            names = functions(src)
+            names = functions(src, types)
         except Exception:
             continue
         for name in names:
@@ -77,7 +87,7 @@ def main():
             if args.limit and seen > args.limit:
                 break
             try:
-                parse_function(src, name)
+                parse_function(src, name, types, table)
                 ok.append((f.relative_to(root), name))
             except CParseError as e:
                 bad.append((f.relative_to(root), name, str(e)))

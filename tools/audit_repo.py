@@ -22,7 +22,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from pareto.api import analyse_c_function
-from pareto.cfront import CParseError, functions, parse_function
+from pareto.cfront import CParseError, collect_context, functions, parse_function
 
 
 def main():
@@ -33,12 +33,19 @@ def main():
     args = ap.parse_args()
 
     lo, hi = (float(x) for x in args.range.split('..'))
-    src = Path(args.path).read_text(encoding='utf-8', errors='replace')
+    target = Path(args.path)
+    src = target.read_text(encoding='utf-8', errors='replace')
+    root = target.parent
+    for _ in range(3):                 # поднимаемся до корня проекта за заголовками
+        if (root.parent / 'include').exists() or (root.parent / 'src').exists():
+            root = root.parent
+    siblings = [p for p in root.rglob('*') if p.suffix in ('.c', '.h')]
+    types, table = collect_context(siblings or [target])
 
     rows = []
-    for name in functions(src):
+    for name in functions(src, types):
         try:
-            prog = parse_function(src, name)
+            prog = parse_function(src, name, types, table)
         except Exception:
             continue
         dom = {a: (lo, hi) for a in prog['args']}

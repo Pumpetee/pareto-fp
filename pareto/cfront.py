@@ -31,6 +31,7 @@ binary64, потому что `2.0` это double, и узла нет. Прис�
 from __future__ import annotations
 
 import re
+from pathlib import Path
 
 from pareto.precision import FLOAT32, FLOAT64, round_op_for
 
@@ -622,8 +623,20 @@ def read_domains(src, before=None):
     return out
 
 
-_SIGNATURE = re.compile(
-    r'\b(double|float)\s+([A-Za-z_][A-Za-z_0-9]*)\s*\(([^)]*)\)\s*\{')
+def _signature_re(types):
+    """Регулярка сигнатуры по НАБОРУ вещественных типов, а не по словам double и float.
+
+    05.10.2026: Chipmunk2D объявляет cpFloat через typedef, и поиск по двум
+    буквальным словам не нашёл в проекте ни одной функции — ноль из тридцати трёх
+    файлов. Это худший вид отказа: инструмент молчит, и молчание читается как
+    «тут всё чисто».
+    """
+    alt = "|".join(re.escape(n).replace(r"\ ", r"\s+")
+                   for n in sorted(types, key=len, reverse=True))
+    return re.compile(r"\b(" + alt + r")\s+([A-Za-z_][A-Za-z_0-9]*)\s*\(([^)]*)\)\s*\{")
+
+
+_SIGNATURE = _signature_re(FLOAT_TYPES)
 
 
 _STRUCT = re.compile(
@@ -632,7 +645,59 @@ _ALIAS = re.compile(r"typedef\s+([A-Za-z_]\w*)\s+([A-Za-z_]\w*)\s*;")
 _FIELD = re.compile(r"\b(double|float)\s+([^;\{\}]+);")
 
 
-def structs(src):
+_TYPEDEF = re.compile(r"typedef\s+([A-Za-z_][A-Za-z_0-9\s]*?)\s+([A-Za-z_]\w*)\s*;")
+
+
+def scalar_types(src, base=None):
+    """Псевдонимы вещественных типов: `typedef float cpFloat;` и цепочки из них.
+
+    Без этого настоящие проекты для нас невидимы. Chipmunk2D объявляет cpFloat,
+    box2d — свои имена, и поиск по буквальным словам double и float не находит в
+    таком файле ни одной функции: не «мы её не поняли», а «мы её не увидели».
+    Разница принципиальная — молчание инструмента читается как «тут всё чисто».
+    """
+    out = dict(base or FLOAT_TYPES)
+    for _ in range(3):                      # цепочки typedef в два-три звена
+        for m in _TYPEDEF.finditer(src):
+            src_t = " ".join(m.group(1).split())
+            dst_t = m.group(2)
+            if src_t in out and dst_t not in out:
+                out[dst_t] = out[src_t]
+    return out
+
+
+def collect_context(paths):
+    """Типы и структуры всего проекта, а не одного файла.
+
+    Структуры и псевдонимы живут в заголовках, а разбираем мы .c — поэтому читать
+    только текущий файл значит отвергать почти всё по причине «тип не объявлен
+    здесь». Собираем один раз по дереву и передаём в разбор.
+    """
+    texts = []
+    for path in paths:
+        try:
+            texts.append(Path(path).read_text(encoding="utf-8", errors="replace"))
+        except OSError:
+            continue
+    # Сначала ВСЕ типы: поле структуры может быть объявлено псевдонимом, который
+    # определён в другом заголовке, и одного прохода тут не хватает.
+    types = dict(FLOAT_TYPES)
+    for _ in range(2):
+        for src in texts:
+            types = scalar_types(src, types)
+    table = {}
+    for src in texts:
+        table.update(structs(src, types))
+    return types, table
+
+
+def _field_re(types):
+    alt = "|".join(re.escape(n).replace(r"\ ", r"\s+")
+                   for n in sorted(types, key=len, reverse=True))
+    return re.compile(r"\b(" + alt + r")\s+([^;\{\}]+);")
+
+
+def structs(src, types=None):
     """Структуры файла как наборы вещественных полей.
 
     Нужно затем, чтобы `Vector3 v` в сигнатуре перестал быть стеной. Поля
@@ -644,12 +709,14 @@ def structs(src):
     Нефещественные поля (int, указатели, вложенные структуры) просто не попадают
     в таблицу — обращение к ним потом честно отвергается по имени.
     """
+    types = types or FLOAT_TYPES
+    field_re = _field_re(types)
     out = {}
     for m in _STRUCT.finditer(src):
         body, name = m.group(1), m.group(2)
         fields = {}
-        for fm in _FIELD.finditer(body):
-            fmt = FLOAT_TYPES[fm.group(1)]
+        for fm in field_re.finditer(body):
+            fmt = types[" ".join(fm.group(1).split())]
             for raw in fm.group(2).split(","):
                 fn = raw.strip()
                 if re.fullmatch(r"[A-Za-z_]\w*", fn or ""):
@@ -665,18 +732,23 @@ def structs(src):
     return out
 
 
-def functions(src):
+def functions(src, types=None):
     """Имена вещественных функций файла — чтобы можно было выбрать нужную."""
-    return [m.group(2) for m in _SIGNATURE.finditer(src)]
+    return [m.group(2) for m in _signature_re(types or scalar_types(src)).finditer(src)]
 
 
-def parse_function(src, name=None):
+def parse_function(src, name=None, types=None, table=None):
     """Разобрать одну функцию файла в программу.
 
     Возвращает словарь: имя, формат результата, аргументы (имя -> формат),
     операторы в формате pareto/program.py и найденные в комментариях диапазоны.
     """
-    matches = list(_SIGNATURE.finditer(src))
+    # Типы и структуры могут прийти снаружи — собранные по всему проекту, а не по
+    # одному файлу: объявления живут в заголовках, а разбираем мы .c.
+    types = types or scalar_types(src)
+    table = dict(table or {})
+    table.update(structs(src, types))
+    matches = list(_signature_re(types).finditer(src))
     if not matches:
         raise CParseError('no function returning double or float found in the file')
     chosen = None
@@ -688,12 +760,11 @@ def parse_function(src, name=None):
         raise CParseError('function {!r} not found. The file defines: {}'.format(
             name, ', '.join(m.group(2) for m in matches)))
 
-    ret_fmt = FLOAT_TYPES[chosen.group(1)]
+    ret_fmt = types[" ".join(chosen.group(1).split())]
     fname = chosen.group(2)
     params = chosen.group(3).strip()
     line0 = src.count('\n', 0, chosen.start()) + 1
 
-    table = structs(src)
     args = {}
     order = []
     if params and params != 'void':
@@ -709,8 +780,8 @@ def parse_function(src, name=None):
                 raise CParseError('parameter {!r} of {} is not a plain double or float'
                                   .format(part.strip(), fname), line0)
             tname, vname = bits[0], bits[1]
-            if tname in FLOAT_TYPES:
-                args[vname] = FLOAT_TYPES[tname]
+            if tname in types:
+                args[vname] = types[tname]
                 order.append(vname)
             elif tname in table:
                 # Структура входит как набор своих вещественных полей: Vector3 v
