@@ -138,6 +138,7 @@ class _Parser:
         self.consts = consts or {}
         self.globs = globs or {}
         self.extra_inputs = {}
+        self.structs = {}
 
     # --- служебное ---
     def peek(self, k=0):
@@ -264,6 +265,52 @@ class _Parser:
         # Целочисленный литерал в вещественном выражении сам по себе точен, а тип
         # ему даёт контекст; для нашей арифметики это просто число.
         return Typed(('num', value), fmt)
+
+    def opaque_local(self):
+        """Локальный объект, полученный откуда-то, чего мы не разбираем.
+
+        В box2d это `b2JointSim* joint = ...;` — семьдесят восемь отказов из ста
+        сорока. Само объявление нам ничего не даёт: значение приходит из поиска по
+        структурам данных, которые мы не моделируем. Но поля такого объекта честно
+        участвуют в расчёте, и правильный ответ — считать их НЕИЗВЕСТНЫМИ входами
+        с обязательным диапазоном, ровно как глобальное состояние. Это загрубление
+        в безопасную сторону: границу оно может только расширить.
+
+        Инициализатор пропускаем целиком: вычислить его мы всё равно не можем, а
+        делать вид, что можем, значит посчитать границу для другой программы.
+        """
+        start = self.i
+        tname = self.take().text
+        while self.at('*'):
+            self.take('*')
+        if self.peek().kind != 'name':
+            self.i = start
+            return False
+        vname = self.take().text
+        depth = 0
+        while True:                       # пропускаем до конца объявления
+            t = self.peek()
+            if t.kind == 'eof':
+                self.i = start
+                return False
+            if t.text in ('(', '{', '['):
+                depth += 1
+            elif t.text in (')', '}', ']'):
+                depth -= 1
+            elif t.text == ';' and depth <= 0:
+                self.take(';')
+                break
+            self.take()
+        flat = {}
+        _expand(self.structs, tname, vname + '.', flat)
+        _expand(self.structs, tname, vname + '->', flat)
+        if not flat:
+            self.i = start
+            return False
+        for key, fmt in flat.items():
+            self.vars[key] = (key, fmt)
+            self.extra_inputs[key] = fmt
+        return True
 
     def struct_bases(self):
         """Имена переменных-структур в текущей области: v, если известно v.x."""
@@ -499,6 +546,8 @@ class _Parser:
             return self.assignment()
         if tok.text == '{':
             return self.block()
+        if tok.kind == 'name' and tok.text in self.structs and self.opaque_local():
+            return []
         raise CParseError('statement starting at {!r} is not supported'.format(tok.text),
                           tok.line)
 
@@ -1102,6 +1151,7 @@ def parse_function(src, name=None, types=None, table=None, resolve=None,
     body = _body_text(src, chosen.end() - 1)
     toks = tokenize(body)
     p = _Parser(toks, resolve=resolve, macros=macros, consts=consts, globs=globs)
+    p.structs = table
     for a in order:
         p.vars[a] = (a, args[a])
     stmts = p.block()
