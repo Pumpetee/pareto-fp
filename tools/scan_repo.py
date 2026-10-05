@@ -20,7 +20,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from pareto.cfront import (CParseError, collect_context, functions,
-                           constants, macro_aliases,
+                           constants, globals_of, macro_aliases,
                            make_resolver, parse_function)
 
 SKIP_DIRS = {'.git', 'build', 'cmake', 'tests', 'test', 'examples', 'third_party',
@@ -73,7 +73,8 @@ def main():
             pass
     macros = macro_aliases(texts)
     consts = constants(texts, types)
-    resolve = make_resolver(texts, types, table, macros=macros, consts=consts)
+    globs = globals_of(texts, types, table)
+    resolve = make_resolver(texts, types, table, macros=macros, consts=consts, globs=globs)
     extra = [t for t in types if t not in ('double', 'float', 'long double')]
     print(f'вещественных типов найдено: {len(types)}'
           + (f' (включая {", ".join(sorted(extra)[:5])})' if extra else ''))
@@ -98,7 +99,7 @@ def main():
             if args.limit and seen > args.limit:
                 break
             try:
-                parse_function(src, name, types, table, resolve, macros, consts)
+                parse_function(src, name, types, table, resolve, macros, consts, globs)
                 ok.append((f.relative_to(root), name))
             except CParseError as e:
                 bad.append((f.relative_to(root), name, str(e)))

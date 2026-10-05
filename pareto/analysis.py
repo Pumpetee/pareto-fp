@@ -36,6 +36,7 @@ LIBM_ULP = float(__import__('os').environ.get('PARETO_LIBM_ULP', 2.0))
 OP_ULP = {
     '+': 1.0, '-': 1.0, '*': 1.0, '/': 1.0, 'sqrt': 1.0, 'fma': 1.0, 'neg': 0.0,
     'exp': LIBM_ULP, 'log': LIBM_ULP, 'expm1': LIBM_ULP,
+    'sin': LIBM_ULP, 'cos': LIBM_ULP, 'atan': LIBM_ULP, 'atan2': LIBM_ULP,
     'log1p': LIBM_ULP, 'hypot': LIBM_ULP,
 }
 
@@ -79,6 +80,7 @@ COST = {
     '+': 1.0, '-': 1.0, '*': 1.0,
     '/': 6.0, 'neg': 0.5,
     'sqrt': 8.0, 'exp': 20.0, 'log': 20.0,
+    'sin': 22.0, 'cos': 22.0, 'atan': 22.0, 'atan2': 30.0,
     # fma(a,b,c) = a*b + c с ОДНИМ округлением на всю операцию: промежуточное
     # произведение не округляется, поэтому по точности fma выгоден почти всегда.
     # А вот по скорости — нет. Аппаратной FMA нет в базовом x86-64, и без явного
@@ -179,6 +181,45 @@ def iv_log1p(a):
     return (math.log1p(a[0]), math.log1p(a[1]))
 
 
+def iv_sin(a):
+    """Синус на интервале. Считаем честно и грубо, но никогда не узко.
+
+    Интервал шире двух пи накрывает оба экстремума, значит ответ ровно [-1, 1].
+    В остальных случаях берём концы и проверяем, попали ли внутрь точки
+    пи/2 + k*пи, где достигаются максимум и минимум. Сузить сильнее можно, но
+    тонкая оценка здесь ничего не даёт: ошибку определяет производная, а она у
+    синуса и так ограничена единицей.
+    """
+    lo, hi = a
+    if not (math.isfinite(lo) and math.isfinite(hi)) or hi - lo >= 2 * math.pi:
+        return (-1.0, 1.0)
+    vals = [math.sin(lo), math.sin(hi)]
+    k = math.floor((lo - math.pi / 2) / math.pi)
+    for j in (k, k + 1, k + 2):
+        x = math.pi / 2 + j * math.pi
+        if lo <= x <= hi:
+            vals.append(math.sin(x))
+    return (min(vals), max(vals))
+
+
+def iv_cos(a):
+    return iv_sin((a[0] + math.pi / 2, a[1] + math.pi / 2))
+
+
+def iv_atan(a):
+    return (math.atan(a[0]), math.atan(a[1]))      # монотонна
+
+
+def iv_atan2(y, x):
+    """atan2 на прямоугольнике. Без тонкостей: весь допустимый диапазон.
+
+    Сузить можно только разбором четвертей и разрыва на отрицательной полуоси,
+    а выигрыш от этого нулевой: ошибку задаёт производная, и она определяется
+    расстоянием до начала координат, а не самим углом.
+    """
+    return (-math.pi, math.pi)
+
+
 def iv_hypot(a, b):
     """Монотонна по |x| и |y|, поэтому границы берутся по модулям."""
     lo = math.hypot(iv_abs_min(a), iv_abs_min(b))
@@ -247,6 +288,10 @@ def _eval_interval_raw(op, kids):
     if op == 'expm1': return iv_expm1(kids[0])
     if op == 'log1p': return iv_log1p(kids[0])
     if op == 'hypot': return iv_hypot(kids[0], kids[1])
+    if op == 'sin': return iv_sin(kids[0])
+    if op == 'cos': return iv_cos(kids[0])
+    if op == 'atan': return iv_atan(kids[0])
+    if op == 'atan2': return iv_atan2(kids[0], kids[1])
     raise ValueError(op)
 
 
@@ -410,6 +455,23 @@ def propagate_error(op, kid_ivs, kid_errs, out_iv, round_scale=1.0):
         if dmin == 0.0:
             return INF
         return kid_errs[0] / dmin + round_off
+    if op in ('sin', 'cos'):
+        # |d sin| <= |dx| и |d cos| <= |dx|: модуль производной не больше единицы.
+        return kid_errs[0] + round_off
+    if op == 'atan':
+        # |d atan| = |dx| / (1 + x^2) <= |dx|
+        return kid_errs[0] + round_off
+    if op == 'atan2':
+        # Частные производные atan2 по модулю не больше 1/r, где r — расстояние
+        # до начала координат. В начале координат угол не определён вовсе, и
+        # честный ответ там — бесконечность, а не красивое число.
+        y, x = kid_ivs
+        r = math.hypot(iv_abs_min(x), iv_abs_min(y))
+        if x[0] <= 0 <= x[1] and y[0] <= 0 <= y[1]:
+            return INF
+        if r == 0.0:
+            return INF
+        return (kid_errs[0] + kid_errs[1]) / r + round_off
     if op == 'hypot':
         # |d hypot / dx| <= 1 и |d hypot / dy| <= 1, поэтому ошибки просто складываются.
         # Главное свойство: промежуточных квадратов нет, значит нет и переполнения,

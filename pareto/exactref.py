@@ -19,6 +19,68 @@ getcontext().prec = 60
 
 
 # ---------- эталон в 60 значащих цифр ----------
+def _pi():
+    """Пи с точностью текущего контекста. Нужно для приведения аргумента.
+
+    Без приведения ряд для синуса на аргументе порядка 1e18 не сходится ни к чему
+    осмысленному: слагаемые растут до 1e18 степени, и шестьдесят цифр съедаются
+    сокращением. А эталон, который врёт, объявляет ошибкой правильный ответ —
+    ровно на этом 26.09.2026 мы уже обожглись.
+    """
+    getcontext().prec += 10
+    three = Decimal(3)
+    lasts, t, s, n, na, d, da = 0, three, 3, 1, 0, 0, 24
+    while s != lasts:
+        lasts = s
+        n, na = n + na, na + 8
+        d, da = d + da, da + 32
+        t = (t * n) / d
+        s += t
+    getcontext().prec -= 10
+    return +s
+
+
+def _dec_sin(x):
+    getcontext().prec += 12
+    pi = _pi()
+    x = x % (2 * pi)                      # приведение: иначе ряд бесполезен
+    i, lasts, s, fact, num, sign = 1, 0, x, 1, x, 1
+    while s != lasts:
+        lasts = s
+        i += 2
+        fact *= i * (i - 1)
+        num *= x * x
+        sign *= -1
+        s += num / fact * sign
+    getcontext().prec -= 12
+    return +s
+
+
+def _dec_cos(x):
+    return _dec_sin(x + _pi() / 2)
+
+
+def _dec_atan(x):
+    """Арктангенс рядом, с переносом большого аргумента в малый."""
+    getcontext().prec += 12
+    one = Decimal(1)
+    if abs(x) > one:
+        r = _pi() / 2 - _dec_atan(one / x)
+        if x < 0:
+            r = -_pi() / 2 - _dec_atan(one / x)
+        getcontext().prec -= 12
+        return +r
+    i, lasts, s, num, sign = 1, 0, x, x, 1
+    while s != lasts:
+        lasts = s
+        i += 2
+        num *= x * x
+        sign *= -1
+        s += sign * num / i
+    getcontext().prec -= 12
+    return +s
+
+
 def exact_tracked(tree, env):
     """Значение и САМАЯ БОЛЬШАЯ промежуточная величина по пути к нему.
 
@@ -42,6 +104,22 @@ def exact_tracked(tree, env):
     if op == 'neg':
         v, m = exact_tracked(tree[1], env)
         return -v, m
+    if op in ('sin', 'cos', 'atan'):
+        v, m = exact_tracked(tree[1], env)
+        r = {'sin': _dec_sin, 'cos': _dec_cos, 'atan': _dec_atan}[op](v)
+        return r, max(m, abs(r))
+    if op == 'atan2':
+        y, my = exact_tracked(tree[1], env)
+        x, mx = exact_tracked(tree[2], env)
+        if x == 0 and y == 0:
+            raise ValueError('atan2(0,0)')
+        if x > 0:
+            r = _dec_atan(y / x)
+        elif x < 0:
+            r = _dec_atan(y / x) + (_pi() if y >= 0 else -_pi())
+        else:
+            r = _pi() / 2 if y > 0 else -_pi() / 2
+        return r, max(my, mx, abs(r))
     if op in ('sqrt', 'exp', 'log'):
         v, m = exact_tracked(tree[1], env)
         r = v.sqrt() if op == 'sqrt' else (v.exp() if op == 'exp' else v.ln())

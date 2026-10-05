@@ -220,7 +220,9 @@ class LoudRefusals(unittest.TestCase):
         self.refuse('double f(double x) { int k = 2; return x; }', 'int')
 
     def test_unsupported_function(self):
-        self.refuse('double f(double x) { return sin(x); }', 'sin')
+        # sin, cos, atan и atan2 поддержаны с 05.10.2026 — отказ проверяем
+        # на функции, для которой у нас по-прежнему нет доказанной границы.
+        self.refuse('double f(double x) { return tan(x); }', 'tan')
 
     def test_unknown_name(self):
         self.refuse('double f(double x) { return x + q; }', 'unknown name')

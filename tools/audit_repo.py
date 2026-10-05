@@ -23,7 +23,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from pareto.api import analyse_c_function
 from pareto.cfront import (CParseError, collect_context, functions,
-                           constants, macro_aliases,
+                           constants, globals_of, macro_aliases,
                            make_resolver, parse_function)
 
 
@@ -52,14 +52,15 @@ def main():
             pass
     macros = macro_aliases(texts)
     consts = constants(texts, types)
-    resolve = make_resolver(texts, types, table, macros=macros, consts=consts)
+    globs = globals_of(texts, types, table)
+    resolve = make_resolver(texts, types, table, macros=macros, consts=consts, globs=globs)
     ctx = {'types': types, 'table': table, 'resolve': resolve, 'macros': macros,
-           'consts': consts}
+           'consts': consts, 'globs': globs}
 
     rows = []
     for name in functions(src, types):
         try:
-            prog = parse_function(src, name, types, table, resolve, macros, consts)
+            prog = parse_function(src, name, types, table, resolve, macros, consts, globs)
         except Exception:
             continue
         dom = {a: (lo, hi) for a in prog['args']}

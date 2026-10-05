@@ -189,7 +189,8 @@ def analyse_c_function(src, name=None, dom=None, keep=8, iters=8, refine=True,
     # Без него файл из чужого репозитория читается в отрыве от своих заголовков.
     c = ctx or {}
     fn = parse_function(src, name, c.get('types'), c.get('table'),
-                        c.get('resolve'), c.get('macros'), c.get('consts'))
+                        c.get('resolve'), c.get('macros'), c.get('consts'),
+                        c.get('globs'))
     domain = dict(fn['domains'])
     if dom:
         domain.update(dom)

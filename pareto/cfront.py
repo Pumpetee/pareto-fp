@@ -46,8 +46,9 @@ INT_TYPES = ('int', 'long', 'short', 'char', 'unsigned', 'signed', 'size_t',
              'uint8_t', 'uint16_t', 'uint32_t', 'uint64_t')
 
 # Функции, которые мы умеем анализировать. Суффикс f — вариант для float.
-MATH1 = {'sqrt': 'sqrt', 'exp': 'exp', 'log': 'log', 'expm1': 'expm1', 'log1p': 'log1p'}
-MATH2 = {'hypot': 'hypot'}
+MATH1 = {'sqrt': 'sqrt', 'exp': 'exp', 'log': 'log', 'expm1': 'expm1', 'log1p': 'log1p',
+         'sin': 'sin', 'cos': 'cos', 'atan': 'atan'}
+MATH2 = {'hypot': 'hypot', 'atan2': 'atan2'}
 MATH3 = {'fma': 'fma'}
 
 REL = ('<=', '>=', '==', '!=', '<', '>')
@@ -125,7 +126,7 @@ def _binary(op, a, b):
 
 
 class _Parser:
-    def __init__(self, toks, resolve=None, macros=None, consts=None):
+    def __init__(self, toks, resolve=None, macros=None, consts=None, globs=None):
         self.t, self.i = toks, 0
         self.vars = {}          # имя в C -> (имя в дереве, формат)
         self.counter = 0
@@ -135,6 +136,8 @@ class _Parser:
         self.resolve = resolve
         self.macros = macros or {}
         self.consts = consts or {}
+        self.globs = globs or {}
+        self.extra_inputs = {}
 
     # --- служебное ---
     def peek(self, k=0):
@@ -231,6 +234,12 @@ class _Parser:
                 key = key + sep + self.take().text
             if key not in self.vars and key in self.consts:
                 return Typed(('num', float(self.consts[key])), FLOAT64)
+            if key not in self.vars and key in self.globs:
+                # Глобальное состояние — свободная величина: регистрируем как вход
+                # и требуем диапазон наравне с аргументами.
+                fmt = self.globs[key]
+                self.vars[key] = (key, fmt)
+                self.extra_inputs[key] = fmt
             if key not in self.vars:
                 raise CParseError('unknown name {!r}: it is neither an argument nor a local '
                                   'variable of this function'.format(key), tok.line)
@@ -367,8 +376,8 @@ class _Parser:
             a, b, c = (self.coerce(x, out_fmt) for x in args)
             # fma — одно округление на всю операцию, ровно это и означает узел fma
             return Typed(_wrap(('fma', a, b, c), out_fmt), out_fmt)
-        if base in ('fabs', 'abs', 'fmin', 'fmax', 'floor', 'ceil', 'round', 'sin', 'cos',
-                    'tan', 'atan', 'atan2', 'asin', 'acos', 'sinh', 'cosh', 'tanh',
+        if base in ('fabs', 'abs', 'fmin', 'fmax', 'floor', 'ceil', 'round',
+                    'tan', 'asin', 'acos', 'sinh', 'cosh', 'tanh',
                     'log10', 'log2', 'exp2', 'cbrt', 'erf', 'tgamma', 'lgamma'):
             raise CParseError(
                 'the function {} is not covered: this method needs a proven bound on the '
@@ -817,7 +826,37 @@ def constants(texts, types):
     return out
 
 
-def make_resolver(texts, types, table, depth=4, macros=None, consts=None):
+_GLOBAL_DECL = re.compile(
+    r"^\s*(?:static\s+)?(?:const\s+)?([A-Za-z_]\w*)\s+([A-Za-z_]\w*)\s*(?:=[^;]*)?;", re.M)
+
+
+def globals_of(texts, types, table):
+    """Глобальное состояние как вход функции, а не как повод для отказа.
+
+    raylib читает CORE.Time.frame и GESTURES.current — шестьдесят одна функция
+    отвергалась именно из-за этого. Но такое имя не «неизвестное», а настоящий
+    вход расчёта: результат от него зависит, значит и граница ошибки зависит.
+    Честно — считать его свободной величиной и требовать для неё диапазон, как
+    для любого аргумента. Молча подставить значение было бы обманом: мы не знаем,
+    что туда положили до вызова.
+    """
+    out = {}
+    for src in texts:
+        for m in _GLOBAL_DECL.finditer(src):
+            tname, name = m.group(1), m.group(2)
+            if name in out or tname in ('return', 'typedef', 'struct', 'union', 'else'):
+                continue
+            if tname in types:
+                out[name] = types[tname]
+            elif tname in table:
+                flat = {}
+                _expand(table, tname, name + '.', flat)
+                out.update(flat)
+    return out
+
+
+def make_resolver(texts, types, table, depth=4, macros=None, consts=None,
+                  globs=None):
     """Разрешатель вызовов: по имени возвращает разобранную соседнюю функцию.
 
     Нужен, чтобы `cpvlength(v)` не отвергался только потому, что внутри зовёт
@@ -842,7 +881,8 @@ def make_resolver(texts, types, table, depth=4, macros=None, consts=None):
                 if not re.search(r"\b" + re.escape(name) + r"\s*\(", src):
                     continue
                 try:
-                    prog = parse_function(src, name, types, table, resolve, macros, consts)
+                    prog = parse_function(src, name, types, table, resolve, macros,
+                                          consts, globs)
                 except Exception:
                     continue
                 cache[name] = prog
@@ -975,7 +1015,7 @@ def functions(src, types=None):
 
 
 def parse_function(src, name=None, types=None, table=None, resolve=None,
-                   macros=None, consts=None):
+                   macros=None, consts=None, globs=None):
     """Разобрать одну функцию файла в программу.
 
     Возвращает словарь: имя, формат результата, аргументы (имя -> формат),
@@ -1061,7 +1101,7 @@ def parse_function(src, name=None, types=None, table=None, resolve=None,
 
     body = _body_text(src, chosen.end() - 1)
     toks = tokenize(body)
-    p = _Parser(toks, resolve=resolve, macros=macros, consts=consts)
+    p = _Parser(toks, resolve=resolve, macros=macros, consts=consts, globs=globs)
     for a in order:
         p.vars[a] = (a, args[a])
     stmts = p.block()
@@ -1070,6 +1110,10 @@ def parse_function(src, name=None, types=None, table=None, resolve=None,
                           .format(p.peek().text), p.peek().line)
 
     stmts = _finish_returns(stmts, ret_fmt)
+    for k, v in p.extra_inputs.items():       # глобалы стали входами
+        if k not in args:
+            args[k] = v
+            order.append(k)
     return {'name': fname, 'result': ret_fmt, 'args': args, 'order': order,
             'stmts': stmts, 'domains': read_domains(src, before=chosen.start()),
             'body_span': body_span(src, chosen.end() - 1), 'line': line0}
