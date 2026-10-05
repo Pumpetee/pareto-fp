@@ -117,10 +117,15 @@ def _binary(op, a, b):
 
 
 class _Parser:
-    def __init__(self, toks):
+    def __init__(self, toks, resolve=None, macros=None):
         self.t, self.i = toks, 0
         self.vars = {}          # имя в C -> (имя в дереве, формат)
         self.counter = 0
+        # Чем разрешать вызовы соседних функций. Без этого настоящий код читается
+        # плохо: он собран композицией, и отвергать функцию только за то, что она
+        # состоит из других, которые мы умеем читать, — потеря на ровном месте.
+        self.resolve = resolve
+        self.macros = macros or {}
 
     # --- служебное ---
     def peek(self, k=0):
@@ -240,10 +245,91 @@ class _Parser:
         # ему даёт контекст; для нашей арифметики это просто число.
         return Typed(('num', value), fmt)
 
+    def struct_bases(self):
+        """Имена переменных-структур в текущей области: v, если известно v.x."""
+        return {k.split('.', 1)[0] for k in self.vars if '.' in k}
+
+    def user_arg(self):
+        """Аргумент пользовательского вызова: либо структура целиком, либо выражение.
+
+        Структура передаётся по имени, а не выражением: в дереве её нет, есть
+        только её поля. Поэтому `cpvdot(v, v)` читается как ссылка на набор полей,
+        а не как попытка вычислить `v`.
+        """
+        tok = self.peek()
+        if (tok.kind == 'name' and tok.text in self.struct_bases()
+                and self.peek(1).text in (',', ')')):
+            self.take()
+            return ('struct', tok.text)
+        return ('expr', self.expr())
+
+    def inline(self, cal, raw, tok):
+        """Подставить тело вызванной функции вместо вызова."""
+        groups, seen = [], set()
+        for a in cal['order']:
+            base = a.split('.', 1)[0] if '.' in a else a
+            if base in seen:
+                continue
+            seen.add(base)
+            fields = [x.split('.', 1)[1] for x in cal['order']
+                      if x.startswith(base + '.')]
+            groups.append((base, fields or None))
+        if len(groups) != len(raw):
+            raise CParseError('call to {} with {} argument(s) does not match its {} '
+                              'parameter(s)'.format(cal['name'], len(raw), len(groups)),
+                              tok.line)
+
+        stmts = cal['stmts']
+        if len(stmts) != 1 or stmts[0][0] != 'return':
+            raise CParseError(
+                'the called function {} is not a single return expression, so it cannot be '
+                'substituted here'.format(cal['name']), tok.line)
+
+        sub = {}
+        for (base, fields), (kind, val) in zip(groups, raw):
+            if fields is None:
+                if kind != 'expr':
+                    raise CParseError('{} expects a number for {!r}, got a struct'
+                                      .format(cal['name'], base), tok.line)
+                sub[base] = val.tree
+            else:
+                if kind != 'struct':
+                    raise CParseError('{} expects a struct for {!r}; pass the variable by '
+                                      'name'.format(cal['name'], base), tok.line)
+                for f in fields:
+                    key = val + '.' + f
+                    if key not in self.vars:
+                        raise CParseError('{!r} has no field {!r} here'.format(val, f),
+                                          tok.line)
+                    sub[base + '.' + f] = ('var', self.vars[key][0])
+
+        def walk(node):
+            if node[0] == 'var':
+                return sub.get(node[1], node)
+            if node[0] in ('num',):
+                return node
+            return (node[0],) + tuple(walk(k) for k in node[1:])
+
+        return Typed(walk(stmts[0][1]), cal['result'])
+
     def call(self):
         tok = self.take()
-        name = tok.text
+        name = self.macros.get(tok.text, tok.text) if self.macros else tok.text
         self.take('(')
+        known = (set(MATH1) | set(MATH2) | set(MATH3) | {'pow', 'fma'}
+                 | {n + 'f' for n in set(MATH1) | set(MATH2) | set(MATH3) | {'pow'}})
+        cal = None
+        if self.resolve is not None and name not in known:
+            cal = self.resolve(name)
+        if cal is not None:
+            raw = []
+            if not self.at(')'):
+                raw.append(self.user_arg())
+                while self.at(','):
+                    self.take(',')
+                    raw.append(self.user_arg())
+            self.take(')')
+            return self.inline(cal, raw, tok)
         args = []
         if not self.at(')'):
             args.append(self.expr())
@@ -666,6 +752,66 @@ def scalar_types(src, base=None):
     return out
 
 
+_DEFINE = re.compile(r"^\s*#\s*define\s+([A-Za-z_]\w*)\s+([A-Za-z_]\w*)\s*$", re.M)
+
+
+def macro_aliases(texts):
+    """Простые псевдонимы вида `#define cpfsqrt sqrt`.
+
+    Chipmunk зовёт математику только через такие имена, и без них `cpvlength`
+    отвергается на ровном месте: внутри честный sqrt, просто названный иначе.
+    Разворачиваем в цепочку, но только имя-в-имя — макросы с аргументами и с
+    телом-выражением не трогаем, про них ничего доказать нельзя.
+    """
+    out = {}
+    for src in texts:
+        for m in _DEFINE.finditer(src):
+            out.setdefault(m.group(1), m.group(2))
+    for _ in range(3):
+        for k, v in list(out.items()):
+            if v in out and out[v] != k:
+                out[k] = out[v]
+    return out
+
+
+def make_resolver(texts, types, table, depth=4, macros=None):
+    """Разрешатель вызовов: по имени возвращает разобранную соседнюю функцию.
+
+    Нужен, чтобы `cpvlength(v)` не отвергался только потому, что внутри зовёт
+    `cpvdot`. Разбор идёт по тем же правилам, с тем же контекстом и с тем же
+    разрешателем — то есть вложенные вызовы тоже подставляются.
+
+    Глубина ограничена: рекурсивная функция иначе уведёт разбор в бесконечность,
+    а доказать про неё этими средствами всё равно нечего. На пределе возвращаем
+    None, и вызов честно отвергается как обычный незнакомый.
+    """
+    cache = {}
+    stack = []
+
+    def resolve(name):
+        if name in cache:
+            return cache[name]
+        if len(stack) >= depth or name in stack:
+            return None
+        stack.append(name)
+        try:
+            for src in texts:
+                if not re.search(r"\b" + re.escape(name) + r"\s*\(", src):
+                    continue
+                try:
+                    prog = parse_function(src, name, types, table, resolve, macros)
+                except Exception:
+                    continue
+                cache[name] = prog
+                return prog
+            cache[name] = None
+            return None
+        finally:
+            stack.pop()
+
+    return resolve
+
+
 def collect_context(paths):
     """Типы и структуры всего проекта, а не одного файла.
 
@@ -737,7 +883,8 @@ def functions(src, types=None):
     return [m.group(2) for m in _signature_re(types or scalar_types(src)).finditer(src)]
 
 
-def parse_function(src, name=None, types=None, table=None):
+def parse_function(src, name=None, types=None, table=None, resolve=None,
+                   macros=None):
     """Разобрать одну функцию файла в программу.
 
     Возвращает словарь: имя, формат результата, аргументы (имя -> формат),
@@ -800,7 +947,7 @@ def parse_function(src, name=None, types=None, table=None):
 
     body = _body_text(src, chosen.end() - 1)
     toks = tokenize(body)
-    p = _Parser(toks)
+    p = _Parser(toks, resolve=resolve, macros=macros)
     for a in order:
         p.vars[a] = (a, args[a])
     stmts = p.block()

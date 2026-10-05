@@ -19,7 +19,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from pareto.cfront import CParseError, collect_context, functions, parse_function
+from pareto.cfront import (CParseError, collect_context, functions,
+                           macro_aliases, make_resolver, parse_function)
 
 SKIP_DIRS = {'.git', 'build', 'cmake', 'tests', 'test', 'examples', 'third_party',
              'external', 'vendor', 'docs', 'doc'}
@@ -63,6 +64,14 @@ def main():
     # а разбираем мы .c. Без этого почти всё отвергается по причине «тип не
     # объявлен здесь», и цифра охвата говорит о нашей слепоте, а не о коде.
     types, table = collect_context(files)
+    texts = []
+    for f in files:
+        try:
+            texts.append(f.read_text(encoding='utf-8', errors='replace'))
+        except OSError:
+            pass
+    macros = macro_aliases(texts)
+    resolve = make_resolver(texts, types, table, macros=macros)
     extra = [t for t in types if t not in ('double', 'float', 'long double')]
     print(f'вещественных типов найдено: {len(types)}'
           + (f' (включая {", ".join(sorted(extra)[:5])})' if extra else ''))
@@ -87,7 +96,7 @@ def main():
             if args.limit and seen > args.limit:
                 break
             try:
-                parse_function(src, name, types, table)
+                parse_function(src, name, types, table, resolve, macros)
                 ok.append((f.relative_to(root), name))
             except CParseError as e:
                 bad.append((f.relative_to(root), name, str(e)))

@@ -22,7 +22,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from pareto.api import analyse_c_function
-from pareto.cfront import CParseError, collect_context, functions, parse_function
+from pareto.cfront import (CParseError, collect_context, functions,
+                           macro_aliases, make_resolver, parse_function)
 
 
 def main():
@@ -40,17 +41,27 @@ def main():
         if (root.parent / 'include').exists() or (root.parent / 'src').exists():
             root = root.parent
     siblings = [p for p in root.rglob('*') if p.suffix in ('.c', '.h')]
-    types, table = collect_context(siblings or [target])
+    pool = siblings or [target]
+    types, table = collect_context(pool)
+    texts = []
+    for f in pool:
+        try:
+            texts.append(f.read_text(encoding='utf-8', errors='replace'))
+        except OSError:
+            pass
+    macros = macro_aliases(texts)
+    resolve = make_resolver(texts, types, table, macros=macros)
+    ctx = {'types': types, 'table': table, 'resolve': resolve, 'macros': macros}
 
     rows = []
     for name in functions(src, types):
         try:
-            prog = parse_function(src, name, types, table)
+            prog = parse_function(src, name, types, table, resolve, macros)
         except Exception:
             continue
         dom = {a: (lo, hi) for a in prog['args']}
         try:
-            res = analyse_c_function(src, name, dom=dom)
+            res = analyse_c_function(src, name, dom=dom, ctx=ctx)
         except Exception as e:
             rows.append((name, None, None, f'{type(e).__name__}'))
             continue
