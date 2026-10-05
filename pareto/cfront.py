@@ -37,6 +37,14 @@ from pareto.precision import FLOAT32, FLOAT64, round_op_for
 
 FLOAT_TYPES = {'double': FLOAT64, 'float': FLOAT32, 'long double': FLOAT64}
 
+# Целые параметры. В вещественной арифметике целое представляется точно, пока
+# |n| < 2^53, и отвергать функцию только за `int count` в сигнатуре — терять её
+# на ровном месте. Опасный случай — целое как счётчик цикла с неизвестным числом
+# шагов — отсекается отдельно, там отказ остаётся.
+INT_TYPES = ('int', 'long', 'short', 'char', 'unsigned', 'signed', 'size_t',
+             'ptrdiff_t', 'int8_t', 'int16_t', 'int32_t', 'int64_t',
+             'uint8_t', 'uint16_t', 'uint32_t', 'uint64_t')
+
 # Функции, которые мы умеем анализировать. Суффикс f — вариант для float.
 MATH1 = {'sqrt': 'sqrt', 'exp': 'exp', 'log': 'log', 'expm1': 'expm1', 'log1p': 'log1p'}
 MATH2 = {'hypot': 'hypot'}
@@ -61,7 +69,7 @@ _TOKEN = re.compile(r"""
     | (?P<bcomment>/\*.*?\*/)
     | (?P<num>(?:\d+\.\d*|\.\d+|\d+)(?:[eE][+-]?\d+)?[fFlL]?)
     | (?P<name>[A-Za-z_][A-Za-z_0-9]*)
-    | (?P<op><<=|>>=|<=|>=|==|!=|&&|\|\||\+\+|--|\+=|-=|\*=|/=|[-+*/%<>=(){};,!&|?:\[\].])
+    | (?P<op><<=|>>=|<=|>=|==|!=|&&|\|\||\+\+|--|->|\+=|-=|\*=|/=|[-+*/%<>=(){};,!&|?:\[\].])
 """, re.VERBOSE | re.DOTALL)
 
 
@@ -117,7 +125,7 @@ def _binary(op, a, b):
 
 
 class _Parser:
-    def __init__(self, toks, resolve=None, macros=None):
+    def __init__(self, toks, resolve=None, macros=None, consts=None):
         self.t, self.i = toks, 0
         self.vars = {}          # имя в C -> (имя в дереве, формат)
         self.counter = 0
@@ -126,6 +134,7 @@ class _Parser:
         # состоит из других, которые мы умеем читать, — потеря на ровном месте.
         self.resolve = resolve
         self.macros = macros or {}
+        self.consts = consts or {}
 
     # --- служебное ---
     def peek(self, k=0):
@@ -217,9 +226,11 @@ class _Parser:
                 return self.call()
             self.take()
             key = tok.text
-            if self.peek().text == '.' and self.peek(1).kind == 'name':
-                self.take('.')
-                key = key + '.' + self.take().text
+            while self.peek().text in ('.', '->') and self.peek(1).kind == 'name':
+                sep = self.take().text
+                key = key + sep + self.take().text
+            if key not in self.vars and key in self.consts:
+                return Typed(('num', float(self.consts[key])), FLOAT64)
             if key not in self.vars:
                 raise CParseError('unknown name {!r}: it is neither an argument nor a local '
                                   'variable of this function'.format(key), tok.line)
@@ -727,6 +738,11 @@ _SIGNATURE = _signature_re(FLOAT_TYPES)
 
 _STRUCT = re.compile(
     r"typedef\s+struct\s*(?:[A-Za-z_]\w*\s*)?\{(.*?)\}\s*([A-Za-z_]\w*)\s*;", re.S)
+# Вторая форма объявления: `struct cpBody { ... };` без typedef. Chipmunk пишет
+# именно так, и без неё указатель на cpBody остаётся для нас пустым типом —
+# 05.10.2026 на этом не сдвинулся охват, хотя указатели уже читались.
+_STRUCT_NAMED = re.compile(
+    r"struct\s+([A-Za-z_]\w*)\s*\{(.*?)\}\s*;", re.S)
 _ALIAS = re.compile(r"typedef\s+([A-Za-z_]\w*)\s+([A-Za-z_]\w*)\s*;")
 _FIELD = re.compile(r"\b(double|float)\s+([^;\{\}]+);")
 
@@ -774,7 +790,34 @@ def macro_aliases(texts):
     return out
 
 
-def make_resolver(texts, types, table, depth=4, macros=None):
+_DEF_NUM = re.compile(
+    r"^\s*#\s*define\s+([A-Za-z_]\w*)\s+\(?\s*([-+]?(?:\d+\.\d*|\.\d+|\d+)(?:[eE][-+]?\d+)?)[fFlL]?\)?\s*$",
+    re.M)
+_GLOBAL = re.compile(
+    r"^\s*(?:static\s+)?(?:const\s+)?([A-Za-z_]\w*)\s+([A-Za-z_]\w*)\s*=\s*"
+    r"([-+]?(?:\d+\.\d*|\.\d+|\d+)(?:[eE][-+]?\d+)?)[fFlL]?\s*;", re.M)
+
+
+def constants(texts, types):
+    """Числовые константы уровня файла: `#define` и инициализированные глобалы.
+
+    В настоящем коде половина формул опирается на такие имена, и отвергать функцию
+    из-за `b2_lengthUnitsPerMeter` — отвергать её из-за ничего. Берём только те,
+    у которых значение — число прямо в объявлении: вычисляемое выражение или
+    значение, присваиваемое где-то ещё, константой не является и сюда не попадает.
+    """
+    out = {}
+    for src in texts:
+        for m in _DEF_NUM.finditer(src):
+            out.setdefault(m.group(1), float(m.group(2)))
+        for m in _GLOBAL.finditer(src):
+            tname, name, val = m.group(1), m.group(2), m.group(3)
+            if tname in types or tname in ("int", "unsigned", "long", "short"):
+                out.setdefault(name, float(val))
+    return out
+
+
+def make_resolver(texts, types, table, depth=4, macros=None, consts=None):
     """Разрешатель вызовов: по имени возвращает разобранную соседнюю функцию.
 
     Нужен, чтобы `cpvlength(v)` не отвергался только потому, что внутри зовёт
@@ -799,7 +842,7 @@ def make_resolver(texts, types, table, depth=4, macros=None):
                 if not re.search(r"\b" + re.escape(name) + r"\s*\(", src):
                     continue
                 try:
-                    prog = parse_function(src, name, types, table, resolve, macros)
+                    prog = parse_function(src, name, types, table, resolve, macros, consts)
                 except Exception:
                     continue
                 cache[name] = prog
@@ -837,6 +880,27 @@ def collect_context(paths):
     return types, table
 
 
+_FIELD_ANY = re.compile(r"\b([A-Za-z_]\w*)\s+([A-Za-z_][^;\{\}]*);")
+
+
+def _expand(table, tname, prefix, out, depth=0):
+    """Разложить структуру в плоский набор скалярных полей.
+
+    У cpBody поле `cpVect p`, и выражение body->p.x раньше отвергалось: в таблице
+    лежали только вещественные поля, а составные пропускались. Разворачиваем
+    вглубь с ограничением: кольцевые ссылки через указатели в структурах бывают,
+    и без предела разбор уходит в бесконечность.
+    """
+    if depth > 3 or tname not in table:
+        return
+    for fld, fmt in table[tname].items():
+        key = prefix + fld
+        if isinstance(fmt, tuple) and fmt[0] == 'struct':
+            _expand(table, fmt[1], key + '.', out, depth + 1)
+        else:
+            out[key] = fmt
+
+
 def _field_re(types):
     alt = "|".join(re.escape(n).replace(r"\ ", r"\s+")
                    for n in sorted(types, key=len, reverse=True))
@@ -867,7 +931,34 @@ def structs(src, types=None):
                 fn = raw.strip()
                 if re.fullmatch(r"[A-Za-z_]\w*", fn or ""):
                     fields[fn] = fmt
+        for fm in _FIELD_ANY.finditer(body):
+            tname2 = fm.group(1)
+            if tname2 in types or tname2 in ('struct', 'const', 'static', 'unsigned'):
+                continue
+            for raw in fm.group(2).split(','):
+                fn = raw.strip()
+                if re.fullmatch(r"[A-Za-z_]\w*", fn or "") and fn not in fields:
+                    fields[fn] = ('struct', tname2)
         if fields:
+            out[name] = fields
+    for m in _STRUCT_NAMED.finditer(src):
+        name, body = m.group(1), m.group(2)
+        fields = {}
+        for fm in field_re.finditer(body):
+            fmt = types[" ".join(fm.group(1).split())]
+            for raw in fm.group(2).split(","):
+                fn = raw.strip()
+                if re.fullmatch(r"[A-Za-z_]\w*", fn or ""):
+                    fields[fn] = fmt
+        for fm in _FIELD_ANY.finditer(body):
+            tname2 = fm.group(1)
+            if tname2 in types or tname2 in ('struct', 'const', 'static', 'unsigned'):
+                continue
+            for raw in fm.group(2).split(','):
+                fn = raw.strip()
+                if re.fullmatch(r"[A-Za-z_]\w*", fn or "") and fn not in fields:
+                    fields[fn] = ('struct', tname2)
+        if fields and name not in out:
             out[name] = fields
     # Псевдонимы вида `typedef Vector4 Quaternion;` — тот же набор полей.
     for _ in range(3):
@@ -884,7 +975,7 @@ def functions(src, types=None):
 
 
 def parse_function(src, name=None, types=None, table=None, resolve=None,
-                   macros=None):
+                   macros=None, consts=None):
     """Разобрать одну функцию файла в программу.
 
     Возвращает словарь: имя, формат результата, аргументы (имя -> формат),
@@ -920,13 +1011,35 @@ def parse_function(src, name=None, types=None, table=None, resolve=None,
             # отваливается только из-за лишнего слова в сигнатуре.
             bits = [w for w in part.replace('*', ' * ').split()
                     if w not in ('const', 'volatile', 'register')]
-            if '*' in bits or '[' in part or ']' in part:
-                raise CParseError('function {} takes a pointer or an array. This mode reads '
-                                  'scalar arguments only'.format(fname), line0)
+            if '[' in part or ']' in part:
+                raise CParseError('function {} takes an array. A reduction over an array is '
+                                  'a separate mode'.format(fname), line0)
+            if '*' in bits:
+                # Указатель на структуру — это чтение её полей, и для границы ошибки
+                # он ничем не отличается от структуры по значению: в дереве живут
+                # только поля. Псевдонимы (два указателя на один объект) границу
+                # только завышают, потому что мы считаем поля независимыми, а
+                # завышение — законная сторона. Запись через указатель отвергается
+                # отдельно: память мы не моделируем.
+                bits = [w for w in bits if w != '*']
+                if len(bits) != 2 or bits[0] not in table:
+                    raise CParseError(
+                        'function {} takes a pointer to {!r}, and that is not a struct '
+                        'declared in this project'.format(fname, ' '.join(bits[:-1])), line0)
+                flat = {}
+                _expand(table, bits[0], bits[1] + '->', flat)
+                for key, fmt in flat.items():
+                    args[key] = fmt
+                    order.append(key)
+                continue
             if len(bits) != 2:
                 raise CParseError('parameter {!r} of {} is not a plain double or float'
                                   .format(part.strip(), fname), line0)
             tname, vname = bits[0], bits[1]
+            if tname in INT_TYPES:
+                args[vname] = FLOAT64
+                order.append(vname)
+                continue
             if tname in types:
                 args[vname] = types[tname]
                 order.append(vname)
@@ -935,8 +1048,9 @@ def parse_function(src, name=None, types=None, table=None, resolve=None,
                 # превращается в v.x, v.y, v.z. Диапазон задаётся каждому полю
                 # отдельно — у координат он обычно разный, и усреднять их значит
                 # соврать в обе стороны сразу.
-                for fld, fmt in table[tname].items():
-                    key = vname + '.' + fld
+                flat = {}
+                _expand(table, tname, vname + '.', flat)
+                for key, fmt in flat.items():
                     args[key] = fmt
                     order.append(key)
             else:
@@ -947,7 +1061,7 @@ def parse_function(src, name=None, types=None, table=None, resolve=None,
 
     body = _body_text(src, chosen.end() - 1)
     toks = tokenize(body)
-    p = _Parser(toks, resolve=resolve, macros=macros)
+    p = _Parser(toks, resolve=resolve, macros=macros, consts=consts)
     for a in order:
         p.vars[a] = (a, args[a])
     stmts = p.block()
