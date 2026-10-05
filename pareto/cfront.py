@@ -210,10 +210,14 @@ class _Parser:
             if self.peek(1).text == '(':
                 return self.call()
             self.take()
-            if tok.text not in self.vars:
+            key = tok.text
+            if self.peek().text == '.' and self.peek(1).kind == 'name':
+                self.take('.')
+                key = key + '.' + self.take().text
+            if key not in self.vars:
                 raise CParseError('unknown name {!r}: it is neither an argument nor a local '
-                                  'variable of this function'.format(tok.text), tok.line)
-            name, fmt = self.vars[tok.text]
+                                  'variable of this function'.format(key), tok.line)
+            name, fmt = self.vars[key]
             return Typed(('var', name), fmt)
         raise CParseError('cannot read an expression starting at {!r}'.format(tok.text),
                           tok.line)
@@ -622,6 +626,45 @@ _SIGNATURE = re.compile(
     r'\b(double|float)\s+([A-Za-z_][A-Za-z_0-9]*)\s*\(([^)]*)\)\s*\{')
 
 
+_STRUCT = re.compile(
+    r"typedef\s+struct\s*(?:[A-Za-z_]\w*\s*)?\{(.*?)\}\s*([A-Za-z_]\w*)\s*;", re.S)
+_ALIAS = re.compile(r"typedef\s+([A-Za-z_]\w*)\s+([A-Za-z_]\w*)\s*;")
+_FIELD = re.compile(r"\b(double|float)\s+([^;\{\}]+);")
+
+
+def structs(src):
+    """Структуры файла как наборы вещественных полей.
+
+    Нужно затем, чтобы `Vector3 v` в сигнатуре перестал быть стеной. Поля
+    становятся обычными скалярами с именами `v.x`, `v.y`, `v.z`, и дальше всё
+    работает как раньше. Типы полей берутся из объявления в том же файле, а не
+    угадываются: инструмент, который предположил тип поля, посчитает границу для
+    программы, которой в файле нет.
+
+    Нефещественные поля (int, указатели, вложенные структуры) просто не попадают
+    в таблицу — обращение к ним потом честно отвергается по имени.
+    """
+    out = {}
+    for m in _STRUCT.finditer(src):
+        body, name = m.group(1), m.group(2)
+        fields = {}
+        for fm in _FIELD.finditer(body):
+            fmt = FLOAT_TYPES[fm.group(1)]
+            for raw in fm.group(2).split(","):
+                fn = raw.strip()
+                if re.fullmatch(r"[A-Za-z_]\w*", fn or ""):
+                    fields[fn] = fmt
+        if fields:
+            out[name] = fields
+    # Псевдонимы вида `typedef Vector4 Quaternion;` — тот же набор полей.
+    for _ in range(3):
+        for m in _ALIAS.finditer(src):
+            src_t, dst_t = m.group(1), m.group(2)
+            if src_t in out and dst_t not in out:
+                out[dst_t] = dict(out[src_t])
+    return out
+
+
 def functions(src):
     """Имена вещественных функций файла — чтобы можно было выбрать нужную."""
     return [m.group(2) for m in _SIGNATURE.finditer(src)]
@@ -650,19 +693,39 @@ def parse_function(src, name=None):
     params = chosen.group(3).strip()
     line0 = src.count('\n', 0, chosen.start()) + 1
 
+    table = structs(src)
     args = {}
     order = []
     if params and params != 'void':
         for part in params.split(','):
-            bits = part.replace('*', ' * ').split()
+            # const и volatile на тип не влияют — убираем, иначе `const Vector3 v`
+            # отваливается только из-за лишнего слова в сигнатуре.
+            bits = [w for w in part.replace('*', ' * ').split()
+                    if w not in ('const', 'volatile', 'register')]
             if '*' in bits or '[' in part or ']' in part:
                 raise CParseError('function {} takes a pointer or an array. This mode reads '
                                   'scalar arguments only'.format(fname), line0)
-            if len(bits) != 2 or bits[0] not in FLOAT_TYPES:
+            if len(bits) != 2:
                 raise CParseError('parameter {!r} of {} is not a plain double or float'
                                   .format(part.strip(), fname), line0)
-            args[bits[1]] = FLOAT_TYPES[bits[0]]
-            order.append(bits[1])
+            tname, vname = bits[0], bits[1]
+            if tname in FLOAT_TYPES:
+                args[vname] = FLOAT_TYPES[tname]
+                order.append(vname)
+            elif tname in table:
+                # Структура входит как набор своих вещественных полей: Vector3 v
+                # превращается в v.x, v.y, v.z. Диапазон задаётся каждому полю
+                # отдельно — у координат он обычно разный, и усреднять их значит
+                # соврать в обе стороны сразу.
+                for fld, fmt in table[tname].items():
+                    key = vname + '.' + fld
+                    args[key] = fmt
+                    order.append(key)
+            else:
+                raise CParseError(
+                    'parameter {!r} of {}: type {!r} is not a plain double or float and no '
+                    'struct with that name is declared in this file'
+                    .format(part.strip(), fname, tname), line0)
 
     body = _body_text(src, chosen.end() - 1)
     toks = tokenize(body)
