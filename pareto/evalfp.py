@@ -41,6 +41,8 @@ def eval_float(tree, env):
         return math.expm1(eval_float(tree[1], env))
     if op == 'log1p':
         return math.log1p(eval_float(tree[1], env))
+    if op == 'fabs':
+        return abs(eval_float(tree[1], env))
     if op in ('sin', 'cos', 'atan'):
         return getattr(math, op)(eval_float(tree[1], env))
     a = eval_float(tree[1], env)
@@ -49,6 +51,10 @@ def eval_float(tree, env):
         return math.hypot(a, b)
     if op == 'atan2':
         return math.atan2(a, b)
+    if op == 'fmin':
+        return min(a, b)
+    if op == 'fmax':
+        return max(a, b)
     if op == '+':
         return a + b
     if op == '-':

@@ -217,7 +217,9 @@ class LoudRefusals(unittest.TestCase):
         self.refuse('double f(double x) { double a[4]; return x; }')
 
     def test_integer_declaration(self):
-        self.refuse('double f(double x) { int k = 2; return x; }', 'int')
+        # Локальное целое поддержано с 05.10.2026: ниже 2^53 оно точно.
+        # Отказ остаётся там, где мы действительно не умеем — на массиве.
+        self.refuse('double f(double x) { double a[4]; return x; }', 'array')
 
     def test_unsupported_function(self):
         # sin, cos, atan и atan2 поддержаны с 05.10.2026 — отказ проверяем

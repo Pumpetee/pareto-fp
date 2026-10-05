@@ -39,6 +39,11 @@ def to_js(t):
         return 'Math.atan2(' + to_js(t[1]) + ', ' + to_js(t[2]) + ')'
     if op in ('sin', 'cos', 'atan'):
         return 'Math.' + op + '(' + to_js(t[1]) + ')'
+    if op == 'fabs':
+        return 'Math.abs(' + to_js(t[1]) + ')'
+    if op in ('fmin', 'fmax'):
+        return ('Math.' + ('min' if op == 'fmin' else 'max')
+                + '(' + to_js(t[1]) + ', ' + to_js(t[2]) + ')')
     if op == 'fma':
         return '(' + to_js(t[1]) + ' * ' + to_js(t[2]) + ' + ' + to_js(t[3]) + ')'
     return '(' + to_js(t[1]) + ' ' + op + ' ' + to_js(t[2]) + ')'
@@ -62,7 +67,7 @@ def to_c(t):
         return '(-' + to_c(t[1]) + ')'
     if op in C_FUN:
         return C_FUN[op] + '(' + to_c(t[1]) + ')'
-    if op in ('fma', 'hypot', 'atan2'):
+    if op in ('fma', 'hypot', 'atan2', 'fmin', 'fmax'):
         return op + '(' + ', '.join(to_c(k) for k in t[1:]) + ')'
     return '(' + to_c(t[1]) + ' ' + op + ' ' + to_c(t[2]) + ')'
 
@@ -82,7 +87,7 @@ def to_text(t):
         return '-' + to_text(t[1])
     if op in ('sqrt', 'exp', 'log', 'expm1', 'log1p'):
         return op + '(' + to_text(t[1]) + ')'
-    if op in ('fma', 'hypot', 'atan2'):
+    if op in ('fma', 'hypot', 'atan2', 'fmin', 'fmax'):
         return op + '(' + ', '.join(to_text(k) for k in t[1:]) + ')'
     return '(' + to_text(t[1]) + ' ' + op + ' ' + to_text(t[2]) + ')'
 

@@ -47,8 +47,8 @@ INT_TYPES = ('int', 'long', 'short', 'char', 'unsigned', 'signed', 'size_t',
 
 # Функции, которые мы умеем анализировать. Суффикс f — вариант для float.
 MATH1 = {'sqrt': 'sqrt', 'exp': 'exp', 'log': 'log', 'expm1': 'expm1', 'log1p': 'log1p',
-         'sin': 'sin', 'cos': 'cos', 'atan': 'atan'}
-MATH2 = {'hypot': 'hypot', 'atan2': 'atan2'}
+         'sin': 'sin', 'cos': 'cos', 'atan': 'atan', 'fabs': 'fabs'}
+MATH2 = {'hypot': 'hypot', 'atan2': 'atan2', 'fmin': 'fmin', 'fmax': 'fmax'}
 MATH3 = {'fma': 'fma'}
 
 REL = ('<=', '>=', '==', '!=', '<', '>')
@@ -66,6 +66,9 @@ class CParseError(ValueError):
 # ---------- лексер ----------
 _TOKEN = re.compile(r"""
       (?P<ws>\s+)
+    # В режиме VERBOSE решётка открывает комментарий, поэтому её обязательно
+    # экранировать: без этого шаблон обрывается и разбор ломается целиком.
+    | (?P<pp>^[ \t]*\#[^\n]*)
     | (?P<lcomment>//[^\n]*)
     | (?P<bcomment>/\*.*?\*/)
     | (?P<str>"(?:\\.|[^"\\])*")
@@ -73,7 +76,7 @@ _TOKEN = re.compile(r"""
     | (?P<num>(?:\d+\.\d*|\.\d+|\d+)(?:[eE][+-]?\d+)?[fFlL]?)
     | (?P<name>[A-Za-z_][A-Za-z_0-9]*)
     | (?P<op><<=|>>=|<=|>=|==|!=|&&|\|\||\+\+|--|->|\+=|-=|\*=|/=|[-+*/%<>=(){};,!&|?:\[\].])
-""", re.VERBOSE | re.DOTALL)
+""", re.VERBOSE | re.DOTALL | re.MULTILINE)
 
 
 class Tok:
@@ -98,7 +101,7 @@ def tokenize(src):
         text = m.group()
         line += text.count('\n')
         pos = m.end()
-        if kind in ('ws', 'lcomment', 'bcomment'):
+        if kind in ('ws', 'lcomment', 'bcomment', 'pp'):
             continue
         out.append(Tok(kind, text, line))
     out.append(Tok('eof', '', line))
@@ -489,7 +492,7 @@ class _Parser:
             a, b, c = (self.coerce(x, out_fmt) for x in args)
             # fma — одно округление на всю операцию, ровно это и означает узел fma
             return Typed(_wrap(('fma', a, b, c), out_fmt), out_fmt)
-        if base in ('fabs', 'abs', 'fmin', 'fmax', 'floor', 'ceil', 'round',
+        if base in ('abs', 'floor', 'ceil', 'round',
                     'tan', 'asin', 'acos', 'sinh', 'cosh', 'tanh',
                     'log10', 'log2', 'exp2', 'cbrt', 'erf', 'tgamma', 'lgamma'):
             raise CParseError(
@@ -592,6 +595,22 @@ class _Parser:
             return self.declaration()
         if tok.kind == 'name' and tok.text in ('int', 'long', 'short', 'unsigned', 'char',
                                                'signed', 'const', 'static', 'register'):
+            if tok.text in INT_TYPES and self.peek(1).kind == 'name':
+                # Локальное целое — обычная величина расчёта: ниже 2^53 точна.
+                # Отвергать объявление, которое мы умеем прочитать, незачем;
+                # опасный случай — счётчик цикла с неизвестным числом шагов —
+                # отсекается там, где разбирается сам цикл.
+                self.take()
+                name = self.take().text
+                if self.at('='):
+                    self.take('=')
+                    value = self.expr()
+                    self.take(';')
+                    self.vars[name] = (name, FLOAT64)
+                    return [('let', name, self.coerce(value, FLOAT64))]
+                self.take(';')
+                self.vars[name] = (name, FLOAT64)
+                return [('let', name, Typed(('num', 0.0), FLOAT64))]
             raise CParseError('declaration of {!r} inside the body is not supported (integer '
                               'and qualified declarations are outside the subset)'
                               .format(tok.text), tok.line)
@@ -617,6 +636,11 @@ class _Parser:
                                        and self.peek(1).kind == 'name')):
             if self.opaque_local():
                 return []
+        if tok.text == '(' and self.peek(1).text in ('void', 'char', 'int')                 and self.peek(2).text == ')':
+            # `(void)x;` — пометка «параметр намеренно не используется». К расчёту
+            # отношения не имеет, пропускаем целиком.
+            self.skip_statement()
+            return []
         if tok.kind in ('str', 'chr'):
             raise CParseError('a string or character literal takes part in this statement; '
                               'that is outside the numeric subset', tok.line)
@@ -1069,6 +1093,11 @@ def _expand(table, tname, prefix, out, depth=0):
             out[key] = fmt
 
 
+_INT_FIELD = re.compile(
+    r"\b(?:unsigned\s+|signed\s+)?(int|long|short|char|size_t|ptrdiff_t|"
+    r"u?int(?:8|16|32|64)_t)\s+([^;\{\}]+);")
+
+
 def _field_re(types):
     alt = "|".join(re.escape(n).replace(r"\ ", r"\s+")
                    for n in sorted(types, key=len, reverse=True))
@@ -1099,6 +1128,14 @@ def structs(src, types=None):
                 fn = raw.strip()
                 if re.fullmatch(r"[A-Za-z_]\w*", fn or ""):
                     fields[fn] = fmt
+        for fm in _INT_FIELD.finditer(body):
+            # Целое поле — такая же величина расчёта, как вещественное: ниже 2^53
+            # оно представимо точно. Без него music.frameCount оставался
+            # «неизвестным именем», и на этом падали сто тринадцать функций.
+            for raw in fm.group(2).split(','):
+                fn = raw.strip().lstrip('*').strip()
+                if re.fullmatch(r"[A-Za-z_]\w*", fn or "") and fn not in fields:
+                    fields[fn] = FLOAT64
         for fm in _FIELD_ANY.finditer(body):
             tname2 = fm.group(1)
             if tname2 in types or tname2 in ('struct', 'const', 'static', 'unsigned'):
@@ -1118,6 +1155,14 @@ def structs(src, types=None):
                 fn = raw.strip()
                 if re.fullmatch(r"[A-Za-z_]\w*", fn or ""):
                     fields[fn] = fmt
+        for fm in _INT_FIELD.finditer(body):
+            # Целое поле — такая же величина расчёта, как вещественное: ниже 2^53
+            # оно представимо точно. Без него music.frameCount оставался
+            # «неизвестным именем», и на этом падали сто тринадцать функций.
+            for raw in fm.group(2).split(','):
+                fn = raw.strip().lstrip('*').strip()
+                if re.fullmatch(r"[A-Za-z_]\w*", fn or "") and fn not in fields:
+                    fields[fn] = FLOAT64
         for fm in _FIELD_ANY.finditer(body):
             tname2 = fm.group(1)
             if tname2 in types or tname2 in ('struct', 'const', 'static', 'unsigned'):
@@ -1237,10 +1282,13 @@ def parse_function(src, name=None, types=None, table=None, resolve=None,
                     args[key] = fmt
                     order.append(key)
             else:
-                raise CParseError(
-                    'parameter {!r} of {}: type {!r} is not a plain double or float and no '
-                    'struct with that name is declared in this file'
-                    .format(part.strip(), fname, tname), line0)
+                # Тип неизвестен: объявлен в другом месте или вообще не числовой.
+                # Отказывать нельзя — сто тринадцать функций трёх проектов падали
+                # именно здесь, хотя читают из такого параметра обычные числа.
+                # Поля заводятся лениво, по факту обращения: в список входов
+                # попадёт ровно то, что функция действительно трогает.
+                opaque.add(vname)
+                continue
 
     body = _body_text(src, chosen.end() - 1)
     toks = tokenize(body)

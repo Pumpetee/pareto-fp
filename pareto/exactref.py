@@ -122,6 +122,9 @@ def exact_tracked(tree, env):
     if op == 'neg':
         v, m = exact_tracked(tree[1], env)
         return -v, m
+    if op == 'fabs':
+        v, m = exact_tracked(tree[1], env)
+        return abs(v), m
     if op in ('sin', 'cos', 'atan'):
         v, m = exact_tracked(tree[1], env)
         r = {'sin': _dec_sin, 'cos': _dec_cos, 'atan': _dec_atan}[op](v)
@@ -144,7 +147,9 @@ def exact_tracked(tree, env):
         return r, max(m, abs(r))
     a, ma = exact_tracked(tree[1], env)
     b, mb = exact_tracked(tree[2], env)
-    if op == '+': r = a + b
+    if op == 'fmin': r = min(a, b)
+    elif op == 'fmax': r = max(a, b)
+    elif op == '+': r = a + b
     elif op == '-': r = a - b
     elif op == '*': r = a * b
     elif op == '/': r = a / b

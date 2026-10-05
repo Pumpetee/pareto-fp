@@ -37,6 +37,7 @@ OP_ULP = {
     '+': 1.0, '-': 1.0, '*': 1.0, '/': 1.0, 'sqrt': 1.0, 'fma': 1.0, 'neg': 0.0,
     'exp': LIBM_ULP, 'log': LIBM_ULP, 'expm1': LIBM_ULP,
     'sin': LIBM_ULP, 'cos': LIBM_ULP, 'atan': LIBM_ULP, 'atan2': LIBM_ULP,
+    'fabs': 0.0, 'fmin': 0.0, 'fmax': 0.0,
     'log1p': LIBM_ULP, 'hypot': LIBM_ULP,
 }
 
@@ -81,6 +82,7 @@ COST = {
     '/': 6.0, 'neg': 0.5,
     'sqrt': 8.0, 'exp': 20.0, 'log': 20.0,
     'sin': 22.0, 'cos': 22.0, 'atan': 22.0, 'atan2': 30.0,
+    'fabs': 0.5, 'fmin': 1.0, 'fmax': 1.0,
     # fma(a,b,c) = a*b + c с ОДНИМ округлением на всю операцию: промежуточное
     # произведение не округляется, поэтому по точности fma выгоден почти всегда.
     # А вот по скорости — нет. Аппаратной FMA нет в базовом x86-64, и без явного
@@ -179,6 +181,23 @@ def iv_log1p(a):
     if a[0] <= -1.0:
         return (-INF, INF)
     return (math.log1p(a[0]), math.log1p(a[1]))
+
+
+def iv_fabs(a):
+    lo, hi = a
+    if lo >= 0:
+        return (lo, hi)
+    if hi <= 0:
+        return (-hi, -lo)
+    return (0.0, max(-lo, hi))
+
+
+def iv_fmin(a, b):
+    return (min(a[0], b[0]), min(a[1], b[1]))
+
+
+def iv_fmax(a, b):
+    return (max(a[0], b[0]), max(a[1], b[1]))
 
 
 def iv_sin(a):
@@ -288,6 +307,9 @@ def _eval_interval_raw(op, kids):
     if op == 'expm1': return iv_expm1(kids[0])
     if op == 'log1p': return iv_log1p(kids[0])
     if op == 'hypot': return iv_hypot(kids[0], kids[1])
+    if op == 'fabs': return iv_fabs(kids[0])
+    if op == 'fmin': return iv_fmin(kids[0], kids[1])
+    if op == 'fmax': return iv_fmax(kids[0], kids[1])
     if op == 'sin': return iv_sin(kids[0])
     if op == 'cos': return iv_cos(kids[0])
     if op == 'atan': return iv_atan(kids[0])
@@ -455,6 +477,17 @@ def propagate_error(op, kid_ivs, kid_errs, out_iv, round_scale=1.0):
         if dmin == 0.0:
             return INF
         return kid_errs[0] / dmin + round_off
+    if op == 'fabs':
+        # Модуль не округляет вовсе: меняется только знаковый бит. Ошибка
+        # аргумента переносится один в один, своей не добавляется.
+        return kid_errs[0]
+    if op in ('fmin', 'fmax'):
+        # Выбор одного из двух. Сам выбор точен, но делается по ВЫЧИСЛЕННЫМ
+        # значениям: у границы, где они почти равны, может выбраться не то, и
+        # тогда ошибка относительно идеала доходит до разности аргументов. Она в
+        # свою очередь не больше суммы их ошибок, поэтому сумма и есть честная
+        # граница — без неё оценка была бы ложью ровно в точке переключения.
+        return kid_errs[0] + kid_errs[1]
     if op in ('sin', 'cos'):
         # |d sin| <= |dx| и |d cos| <= |dx|: модуль производной не больше единицы.
         return kid_errs[0] + round_off
