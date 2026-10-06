@@ -10,6 +10,13 @@
 Узлы округления к узкому формату здесь ВЫПОЛНЯЮТСЯ. Иначе замер шёл бы для
 программы в binary64, а граница печаталась бы для программы в binary32, и
 сравнивать их было бы бессмысленно.
+
+Особые случаи считаются по IEEE-754, а не по правилам Python. Это не придирка:
+Python на делении на ноль бросает исключение, а машина выдаёт бесконечность и
+идёт дальше. Пока здесь было исключение, фаззер МОЛЧА пропускал все такие точки —
+то есть целая область входов никогда не проверялась, и нарушение границы в ней
+осталось бы незамеченным. Нашлось это 06.10.2026 побитовой сверкой с clang на
+Normalize и Remap из raylib: компилятор отдавал inf, мы падали.
 """
 from __future__ import annotations
 
@@ -17,6 +24,54 @@ import math
 
 from pareto.fma_compat import fma as exact_fma
 from pareto.precision import ROUND_OPS
+
+
+NAN = float('nan')
+INF = float('inf')
+
+
+def _div(a, b):
+    """Деление по IEEE-754: на нуле не исключение, а бесконечность или NaN."""
+    if b == 0.0:
+        if a == 0.0 or a != a:
+            return NAN
+        # Знак нуля значим: 1/-0.0 это минус бесконечность, а не плюс.
+        return math.copysign(INF, a) * math.copysign(1.0, b)
+    try:
+        return a / b
+    except OverflowError:
+        return math.copysign(INF, a) * math.copysign(1.0, b)
+
+
+def _log(v):
+    """Логарифм по IEEE-754: у нуля минус бесконечность, у отрицательного NaN."""
+    if v != v:
+        return NAN
+    if v == 0.0:
+        return -INF
+    if v < 0.0:
+        return NAN
+    return math.log(v)
+
+
+def _log1p(v):
+    if v != v:
+        return NAN
+    if v == -1.0:
+        return -INF
+    if v < -1.0:
+        return NAN
+    return math.log1p(v)
+
+
+def _overflows(fn, v):
+    """Переполнение в libm даёт бесконечность, а не исключение."""
+    if v != v:
+        return NAN
+    try:
+        return fn(v)
+    except OverflowError:
+        return INF
 
 
 def eval_float(tree, env):
@@ -32,15 +87,17 @@ def eval_float(tree, env):
     if op == 'neg':
         return -eval_float(tree[1], env)
     if op == 'sqrt':
-        return math.sqrt(eval_float(tree[1], env))
+        v = eval_float(tree[1], env)
+        return math.sqrt(v) if v >= 0.0 else NAN
     if op == 'exp':
-        return math.exp(eval_float(tree[1], env))
+        return _overflows(math.exp, eval_float(tree[1], env))
     if op == 'log':
-        return math.log(eval_float(tree[1], env))
+        return _log(eval_float(tree[1], env))
     if op == 'expm1':
-        return math.expm1(eval_float(tree[1], env))
+        return _overflows(math.expm1, eval_float(tree[1], env))
     if op == 'log1p':
-        return math.log1p(eval_float(tree[1], env))
+        v = eval_float(tree[1], env)
+        return _log1p(v)
     if op == 'fabs':
         return abs(eval_float(tree[1], env))
     if op in ('sin', 'cos', 'atan'):
@@ -62,7 +119,7 @@ def eval_float(tree, env):
     if op == '*':
         return a * b
     if op == '/':
-        return a / b
+        return _div(a, b)
     if op == 'fma':
         c = eval_float(tree[3], env)
         return exact_fma(a, b, c)

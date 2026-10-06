@@ -46,11 +46,18 @@ def to_js(t):
                 + '(' + to_js(t[1]) + ', ' + to_js(t[2]) + ')')
     if op == 'fma':
         return '(' + to_js(t[1]) + ' * ' + to_js(t[2]) + ' + ' + to_js(t[3]) + ')'
+    if len(t) != 3:
+        raise ValueError('to_js does not know the operation {!r}'.format(op))
     return '(' + to_js(t[1]) + ' ' + op + ' ' + to_js(t[2]) + ')'
 
 
+# sin, cos, atan и fabs попали в анализ, а в печать их внести забыли: узел шёл в
+# конец функции, где его разбирали как двуместный, и печать падала по выходу за
+# границу кортежа. Это та самая строка, которую человек вставляет в свой код, то
+# есть ломался не отчёт, а продукт. Найдено 06.10.2026 при показе хода фаззера.
 C_FUN = {'sqrt': 'sqrt', 'exp': 'exp', 'log': 'log',
-         'expm1': 'expm1', 'log1p': 'log1p'}
+         'expm1': 'expm1', 'log1p': 'log1p',
+         'sin': 'sin', 'cos': 'cos', 'atan': 'atan', 'fabs': 'fabs'}
 
 
 def to_c(t):
@@ -69,6 +76,8 @@ def to_c(t):
         return C_FUN[op] + '(' + to_c(t[1]) + ')'
     if op in ('fma', 'hypot', 'atan2', 'fmin', 'fmax'):
         return op + '(' + ', '.join(to_c(k) for k in t[1:]) + ')'
+    if len(t) != 3:
+        raise ValueError('to_c does not know the operation {!r}'.format(op))
     return '(' + to_c(t[1]) + ' ' + op + ' ' + to_c(t[2]) + ')'
 
 
@@ -85,10 +94,15 @@ def to_text(t):
         return t[1]
     if op == 'neg':
         return '-' + to_text(t[1])
-    if op in ('sqrt', 'exp', 'log', 'expm1', 'log1p'):
+    if op in ('sqrt', 'exp', 'log', 'expm1', 'log1p',
+              'sin', 'cos', 'atan', 'fabs'):
         return op + '(' + to_text(t[1]) + ')'
     if op in ('fma', 'hypot', 'atan2', 'fmin', 'fmax'):
         return op + '(' + ', '.join(to_text(k) for k in t[1:]) + ')'
+    if len(t) != 3:
+        # Лучше внятный отказ, чем выход за границу кортежа где-то в глубине:
+        # неизвестная одноместная операция должна называть себя сама.
+        raise ValueError('to_text does not know the operation {!r}'.format(op))
     return '(' + to_text(t[1]) + ' ' + op + ' ' + to_text(t[2]) + ')'
 
 

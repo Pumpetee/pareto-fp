@@ -14,7 +14,9 @@
 from __future__ import annotations
 
 import math
+import os
 import random
+import time
 import sys
 import unittest
 from decimal import Decimal, getcontext
@@ -24,6 +26,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from pareto.analysis import pareto_extract, refine_front, tree_cost, tree_cost_refined
 from pareto.codegen import to_text
+
+TRACE = os.environ.get('PARETO_FUZZ_TRACE') == '1'
 from pareto.egraph import EGraph
 from pareto.rules import RULES
 from pareto.exactref import exact_stable
@@ -86,12 +90,20 @@ def measure(tree, expr, domain, rng):
     for env in pts:
         try:
             got = eval_float(tree, env)
+        except (ValueError, ZeroDivisionError, OverflowError, KeyError):
+            continue
+        # Проверка на «не число» стоит ДО эталона нарочно. Исполнитель теперь
+        # считает особые случаи по IEEE-754 и на деление на ноль отдаёт
+        # бесконечность вместо исключения — правильно, но из-за этого эталон на
+        # сотни цифр стал считаться для точек, которые всё равно отбрасываются.
+        # Один сид из пяти перестал укладываться в отведённое время.
+        if not math.isfinite(got):
+            continue
+        try:
             ref = exact_stable(expr, {k: Decimal(v) for k, v in env.items()})
             if ref is None:
                 continue        # эталон сам себе не доверяет — такую точку не судим
         except (ValueError, ZeroDivisionError, OverflowError, KeyError):
-            continue
-        if not math.isfinite(got):
             continue
         worst = max(worst, abs(Decimal(got) - ref))
         scale = max(scale, abs(ref))
@@ -104,10 +116,17 @@ class FuzzBound(unittest.TestCase):
         checked_forms = 0
         violations = []
 
-        for _ in range(EXPRESSIONS):
+        for _idx in range(EXPRESSIONS):
             names = ['x', 'y'][:rng.choice([1, 2])]
             expr = random_tree(rng, names)
             domain = random_domain(rng, names)
+            # Показ хода по требованию. Без него «фаззер не уложился в отведённое
+            # время» — это сообщение, с которым нечего делать: какое из сотен
+            # выражений виновато, неизвестно. С PARETO_FUZZ_TRACE=1 виновник
+            # называется сразу.
+            if TRACE:
+                _t0 = time.time()
+                print('  {:>4} {}'.format(_idx, to_text(expr)[:70]), flush=True)
 
             try:
                 _, base_bound, base_iv, _, _ = tree_cost(expr, domain)
@@ -131,6 +150,9 @@ class FuzzBound(unittest.TestCase):
             except Exception:
                 bounds = [tree_cost_refined(expr, domain)[1]]
 
+            if TRACE and time.time() - _t0 > 5.0:
+                print('    ^ разбор занял {:.1f} c, домен {}'.format(
+                    time.time() - _t0, dict(domain)), flush=True)
             for tree, bound in zip(forms, bounds):
                 if not math.isfinite(bound):
                     continue

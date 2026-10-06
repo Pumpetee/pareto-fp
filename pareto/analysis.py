@@ -144,36 +144,73 @@ def iv_div(a, b):
     return (min(c), max(c))
 
 
-def _finite_iv(tree, domain):
-    """Конечны ли все промежуточные величины выражения на этом домене.
+_FINITE_CACHE = {}
 
-    Отдельно от оценки ошибки и нарочно без неё: здесь нужен только дешёвый
-    интервальный проход по значениям, чтобы на него можно было опираться внутри
-    переноса ошибки, не рискуя закруситься.
+
+def _value_iv(tree, domain, cache):
+    """Интервал ЗНАЧЕНИЙ выражения, без всякой оценки ошибки.
+
+    Нарочно отдельный проход. Первая версия этой проверки звала tree_cost, то
+    есть полный расчёт вместе с переносом ошибки, и делала это на каждом узле —
+    получался квадратичный взрыв, из которого один сид фаззера перестал
+    укладываться в отведённое время. Здесь нужен только порядок величин, и
+    считать его надо ровно столько раз, сколько в дереве разных поддеревьев.
     """
+    hit = cache.get(tree)
+    if hit is not None:
+        return hit
     op = tree[0]
-    if op in ('f32', 'f16'):
-        return _finite_iv(tree[1], domain)
-    if op == 'num':
-        return math.isfinite(float(tree[1]))
-    if op == 'var':
-        lo, hi = domain.get(tree[1], (-INF, INF))
-        return math.isfinite(lo) and math.isfinite(hi)
-    ivs = []
-    for k in tree[1:]:
-        if not isinstance(k, tuple):
-            return False
-        if not _finite_iv(k, domain):
-            return False
+    if op in ('f32', 'f16', 'approx', 'eft'):
+        out = _value_iv(tree[1], domain, cache)
+    elif op == 'num':
+        v = float(tree[1])
+        out = (v, v)
+    elif op == 'var':
+        out = domain.get(tree[1], (-INF, INF))
+    else:
+        kids = []
+        for k in tree[1:]:
+            if not isinstance(k, tuple):
+                out = (-INF, INF)
+                cache[tree] = out
+                return out
+            kids.append(_value_iv(k, domain, cache))
         try:
-            ivs.append(tree_cost(k, domain)[2])
+            out = eval_interval(op, kids)
         except (ValueError, ZeroDivisionError, OverflowError, KeyError):
+            out = (-INF, INF)
+    cache[tree] = out
+    return out
+
+
+def _finite_iv(tree, domain):
+    """Конечны ли ВСЕ промежуточные величины выражения на этом домене.
+
+    Отдельно от оценки ошибки и нарочно без неё: на эту проверку опирается перенос
+    ошибки, и звать оттуда полный расчёт значило бы считать одно и то же по кругу.
+    """
+    key = (tree, tuple(sorted(domain.items())))
+    hit = _FINITE_CACHE.get(key)
+    if hit is not None:
+        return hit
+    cache = {}
+
+    def walk(node):
+        lo, hi = _value_iv(node, domain, cache)
+        if not (math.isfinite(lo) and math.isfinite(hi)):
             return False
-    try:
-        lo, hi = eval_interval(op, ivs)
-    except (ValueError, ZeroDivisionError, OverflowError, KeyError):
-        return False
-    return math.isfinite(lo) and math.isfinite(hi)
+        if node[0] in ('num', 'var'):
+            return True
+        for k in node[1:]:
+            if not isinstance(k, tuple) or not walk(k):
+                return False
+        return True
+
+    out = walk(tree)
+    if len(_FINITE_CACHE) > 20000:
+        _FINITE_CACHE.clear()
+    _FINITE_CACHE[key] = out
+    return out
 
 
 def nonneg_computed(tree, domain):
