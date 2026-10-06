@@ -32,6 +32,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from pareto.cfront import (collect_context, constants, functions, globals_of,
                            macro_aliases, make_resolver, parse_function)
 from pareto.evalfp import eval_float
+from pareto.program import paths
 from pareto.precision import FLOAT32, FLOAT64
 
 def find_clang():
@@ -181,25 +182,42 @@ def build_case(name, ret, params, args, scalar32, scalar64):
     return decls, call, order, ret_c, width
 
 
-def tree_of(prog):
-    """Выражение единственного пути: локальные переменные подставлены внутрь."""
-    env, result = {}, None
-    for st in prog['stmts']:
-        if st[0] == 'let':
-            env[st[1]] = st[2].tree if hasattr(st[2], 'tree') else st[2]
-        elif st[0] == 'return':
-            result = st[1]
-    if result is None:
+RELOP = {'<': lambda a, b: a < b, '<=': lambda a, b: a <= b,
+         '>': lambda a, b: a > b, '>=': lambda a, b: a >= b,
+         '==': lambda a, b: a == b, '!=': lambda a, b: a != b}
+
+
+def paths_of(prog):
+    """Все пути исполнения функции. Один путь — частный случай, а не отдельный.
+
+    Судья раньше умел только прямолинейные функции, и ровно поэтому мимо него
+    прошли b2MinFloat, b2MaxFloat, b2AbsFloat и b2ClampFloat — то есть именно то
+    новое, что принял фронтенд. Проверять надо прежде всего свежее, а не то, что
+    и так лежало.
+    """
+    try:
+        return paths(prog['stmts'])
+    except Exception:
         return None
 
-    def walk(node):
-        if node[0] == 'var' and node[1] in env:
-            return walk(env[node[1]])
-        if node[0] in ('num', 'var'):
-            return node
-        return (node[0],) + tuple(walk(k) for k in node[1:])
 
-    return walk(result)
+def eval_paths(ps, vals):
+    """Значение функции: условия решаются по ВЫЧИСЛЕННЫМ величинам, как в машине.
+
+    Не по истинным и не по интервалам: в живом коде `if (a < b)` сравнивает те
+    числа, что получились после округлений, и выбор ветки зависит именно от них.
+    """
+    for pth in ps:
+        ok = True
+        for cond, want in pth.guards:
+            op, left, right = cond
+            got = RELOP[op](eval_float(left, vals), eval_float(right, vals))
+            if got != want:
+                ok = False
+                break
+        if ok:
+            return eval_float(pth.expr, vals)
+    raise ValueError('ни один путь не выбран')
 
 
 def run_file(target, ctx, a, lo, hi, tmp, inc_args=(), label=''):
@@ -223,10 +241,7 @@ def run_file(target, ctx, a, lo, hi, tmp, inc_args=(), label=''):
             prog = parse_function(src, name, ctx['types'], ctx['table'], ctx['resolve'], ctx['macros'], ctx['consts'], ctx['globs'])
         except Exception:
             continue
-        if any(st[0] not in ('let', 'return') for st in prog['stmts']):
-            skipped += 1
-            skip('ветвление в теле')
-            continue
+
         ret, params = signature(src, name)
         if not params:
             skipped += 1
@@ -239,10 +254,10 @@ def run_file(target, ctx, a, lo, hi, tmp, inc_args=(), label=''):
             skip('тип возврата или параметра не скалярный')
             continue
         decls, call, order, ret_c, out_width = built
-        tree = tree_of(prog)
-        if tree is None:
+        ps = paths_of(prog)
+        if ps is None:
             skipped += 1
-            skip('нет возврата')
+            skip('пути исполнения не выведены')
             continue
 
         code = HARNESS % {
@@ -291,7 +306,7 @@ def run_file(target, ctx, a, lo, hi, tmp, inc_args=(), label=''):
             c_bits = int(got.stdout.strip(), 16)
             c_val = from_bits(c_bits, out_width)
             try:
-                ours = eval_float(tree, vals)
+                ours = eval_paths(ps, vals)
             except Exception as e:
                 mism = (dict(vals), 'исключение ' + type(e).__name__, repr(c_val))
                 break

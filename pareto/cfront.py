@@ -414,9 +414,19 @@ class _Parser:
 
         stmts = cal['stmts']
         if len(stmts) != 1 or stmts[0][0] != 'return':
-            raise CParseError(
-                'the called function {} is not a single return expression, so it cannot be '
-                'substituted here'.format(cal['name']), tok.line)
+            picked = as_select(stmts)
+            if picked is None:
+                raise CParseError(
+                    'the called function {} is not a single return expression, so it cannot '
+                    'be substituted here'.format(cal['name']), tok.line)
+            tree, fmt = picked
+            # Формат берём из ОБЪЯВЛЕННОГО типа возврата вызванной функции, а не
+            # по догадке. Поставить здесь FLOAT64 по умолчанию значило бы, что
+            # вызов float-функции внутри выражения считается у нас в двойной
+            # точности, а в C в одинарной: то есть мы разбираем не ту программу,
+            # что написана. Само выражение уже несёт нужные округления — их
+            # навесил _finish_returns при разборе вызванной функции.
+            stmts = [('return', Typed(tree, cal.get('result') or fmt or FLOAT64))]
 
         sub = {}
         for (base, fields), (kind, val) in zip(groups, raw):
@@ -621,9 +631,9 @@ class _Parser:
             return self.for_statement()
         if tok.text == 'return':
             self.take('return')
-            value = self.expr()
+            out = self.return_expr()
             self.take(';')
-            return [('return', value)]
+            return out
         if tok.text in ('while', 'do', 'switch', 'goto', 'break', 'continue'):
             raise CParseError('{!r} is not supported: this method proves bounds on '
                               'straight-line code, on conditionals and on loops with a known '
@@ -702,6 +712,79 @@ class _Parser:
         # куда уже подставлено. Иначе `t = t + 1` дало бы рекурсивную подстановку.
         self.vars[name] = (inner, fmt)
         return [('let', inner, tree)]
+
+
+    def match_paren(self, i):
+        """Индекс закрывающей скобки, парной к открывающей на позиции i."""
+        depth = 0
+        while i < len(self.t):
+            txt = self.t[i].text
+            if txt in ('(', '['):
+                depth += 1
+            elif txt in (')', ']'):
+                depth -= 1
+                if depth == 0:
+                    return i
+            i += 1
+        return None
+
+    def ternary_question(self):
+        """Позиция `?` тернарника на верхнем уровне текущего выражения, иначе None.
+
+        Выражение кончается на `;`, на `:` своей же ветки или на закрывающей
+        скобке нулевой глубины. Вопрос внутри скобок верхним уровнем не считается:
+        на завёрнутый в скобки тернарник есть отдельная развёртка.
+        """
+        depth, i = 0, self.i
+        while i < len(self.t):
+            txt = self.t[i].text
+            if txt in ('(', '['):
+                depth += 1
+            elif txt in (')', ']'):
+                if depth == 0:
+                    return None
+                depth -= 1
+            elif depth == 0:
+                if txt in (';', ':', ','):
+                    return None
+                if txt == '?':
+                    return i
+            i += 1
+        return None
+
+    def return_expr(self):
+        """Выражение возврата, в котором тернарник понижается до ветвления.
+
+        `return c ? a : b;` это ровно `if (c) return a; else return b;`, а механизм
+        ветвления у нас уже есть: каждый путь получает своё условие достижимости и
+        свою границу, плюс отдельно считается прыжок между ветками у границы
+        условия. Поэтому тернарник не требует ни нового узла, ни нового правила —
+        только понижения на разборе.
+
+        Так принимаются b2MinFloat, b2MaxFloat, b2AbsFloat и b2ClampFloat из box2d,
+        то есть именно те функции, в которых есть что считать. Тернарник в
+        ПРИСВАИВАНИИ по-прежнему отвергается, и честно: там управление сходится
+        обратно, и после схождения переменная имеет разные значения в разных
+        ветках — подстановкой это не выражается.
+        """
+        # Выражение целиком в скобках: лишние скобки ничего не меняют, а
+        # завёрнутый тернарник иначе остался бы незамеченным. Так читается
+        # вложенный случай `a < lo ? lo : ( a > hi ? hi : a )`.
+        if self.at('('):
+            close = self.match_paren(self.i)
+            if close is not None and self.t[close + 1].text in (';', ':', ')'):
+                self.take('(')
+                out = self.return_expr()
+                self.take(')')
+                return out
+        if self.ternary_question() is None:
+            return [('return', self.expr())]
+        cond = self.condition()
+        self.take('?')
+        then_part = self.return_expr()
+        self.take(':')
+        else_part = self.return_expr()
+        return _lower_cond(cond, then_part, else_part)
 
     def if_statement(self):
         self.take('if')
@@ -835,6 +918,64 @@ def _subst_cond(cond, env):
     if cond[0] in ('and', 'or'):
         return (cond[0], _subst_cond(cond[1], env), _subst_cond(cond[2], env))
     return (cond[0], substitute(cond[1], env), substitute(cond[2], env))
+
+
+def as_select(stmts):
+    """Свести тело из одного ветвления к выражению, если это выбор, а не разветвление.
+
+    Понижение тернарника сделало b2MinFloat, b2MaxFloat и b2AbsFloat функциями с
+    ветвлением — правильно по смыслу, но подстановка таких внутрь других функций
+    сразу перестала работать: вставить две ветки в середину выражения нельзя.
+
+    Однако ровно эти три вида ветвления выражением как раз записываются, и в
+    IEEE-754 ровно теми операциями, что у нас уже есть:
+        a < b ? a : b   это fmin(a, b)
+        a > b ? a : b   это fmax(a, b)
+        a < 0 ? -a : a  это fabs(a)
+    Сведение делается только при ПОЛНОМ совпадении ветвей с частями сравнения:
+    любое отличие — и мы отказываемся, потому что угадывать здесь нельзя. Что
+    сведение верно побитово, проверяет сверка с компилятором, а не моё мнение.
+    """
+    if len(stmts) != 1 or stmts[0][0] != 'if':
+        return None
+    _, cond, then_part, else_part = stmts[0]
+    if (len(then_part) != 1 or then_part[0][0] != 'return'
+            or len(else_part) != 1 or else_part[0][0] != 'return'):
+        return None
+    if cond[0] not in ('<', '<=', '>', '>='):
+        return None
+    left, right = cond[1], cond[2]
+    a = then_part[0][1]
+    b = else_part[0][1]
+    at = a.tree if hasattr(a, 'tree') else a
+    bt = b.tree if hasattr(b, 'tree') else b
+    lt = left.tree if hasattr(left, 'tree') else left
+    rt = right.tree if hasattr(right, 'tree') else right
+
+    def is_zero(node):
+        return node[0] == 'num' and float(node[1]) == 0.0
+
+    def negates(node, base):
+        if node[0] == 'neg' and node[1] == base:
+            return True
+        # Запись через вычитание из нуля встречается не реже.
+        return (node[0] == '-' and is_zero(node[1]) and node[2] == base)
+
+    fmt = a.fmt if hasattr(a, 'fmt') else None
+    less = cond[0] in ('<', '<=')
+
+    # модуль: a < 0 ? -a : a
+    if is_zero(rt) and at is not None and negates(at, lt) and bt == lt:
+        return ('fabs', lt), fmt
+    # модуль наоборот: a > 0 ? a : -a
+    if is_zero(rt) and not less and at == lt and negates(bt, lt):
+        return ('fabs', lt), fmt
+    # минимум и максимум
+    if at == lt and bt == rt:
+        return (('fmin' if less else 'fmax'), lt, rt), fmt
+    if at == rt and bt == lt:
+        return (('fmax' if less else 'fmin'), lt, rt), fmt
+    return None
 
 
 def _lower_cond(cond, then_part, else_part):
