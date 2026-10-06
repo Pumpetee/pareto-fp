@@ -144,6 +144,38 @@ def iv_div(a, b):
     return (min(c), max(c))
 
 
+def _finite_iv(tree, domain):
+    """Конечны ли все промежуточные величины выражения на этом домене.
+
+    Отдельно от оценки ошибки и нарочно без неё: здесь нужен только дешёвый
+    интервальный проход по значениям, чтобы на него можно было опираться внутри
+    переноса ошибки, не рискуя закруситься.
+    """
+    op = tree[0]
+    if op in ('f32', 'f16'):
+        return _finite_iv(tree[1], domain)
+    if op == 'num':
+        return math.isfinite(float(tree[1]))
+    if op == 'var':
+        lo, hi = domain.get(tree[1], (-INF, INF))
+        return math.isfinite(lo) and math.isfinite(hi)
+    ivs = []
+    for k in tree[1:]:
+        if not isinstance(k, tuple):
+            return False
+        if not _finite_iv(k, domain):
+            return False
+        try:
+            ivs.append(tree_cost(k, domain)[2])
+        except (ValueError, ZeroDivisionError, OverflowError, KeyError):
+            return False
+    try:
+        lo, hi = eval_interval(op, ivs)
+    except (ValueError, ZeroDivisionError, OverflowError, KeyError):
+        return False
+    return math.isfinite(lo) and math.isfinite(hi)
+
+
 def nonneg_computed(tree, domain):
     """Доказуемо ли, что ВЫЧИСЛЕННОЕ значение выражения неотрицательно.
 
@@ -159,6 +191,15 @@ def nonneg_computed(tree, domain):
     корень и модуль тоже. Вычитание в список не входит никогда — именно оно и
     уводит под ноль.
     """
+    # Неотрицательность одной формы записи недостаточна: ноль, умноженный на
+    # переполнившуюся величину, даёт NaN, а NaN не больше нуля и не меньше его.
+    # Найдено состязательной пробой 06.10.2026 на выражении 0 * ((x + x) * x) при
+    # x порядка 1e299 — функция говорила «неотрицательно», живой код отдавал NaN.
+    # Тогда это было прикрыто отказом по переполнению в другом месте, то есть мы
+    # держались на везении. Поэтому прежде формы требуем конечности: где величины
+    # конечны, там ни NaN из 0*inf, ни inf-inf появиться не может.
+    if not _finite_iv(tree, domain):
+        return False
     op = tree[0]
     if op in ('f32', 'f16'):
         return nonneg_computed(tree[1], domain)

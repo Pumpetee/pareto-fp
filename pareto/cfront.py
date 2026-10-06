@@ -254,7 +254,8 @@ class _Parser:
                 sep = self.take().text
                 key = key + sep + self.take().text
             if key not in self.vars and key in self.consts:
-                return Typed(('num', float(self.consts[key])), FLOAT64)
+                fmt = getattr(self.consts, 'fmts', {}).get(key, FLOAT64)
+                return Typed(('num', float(self.consts[key])), fmt)
             if key not in self.vars and ('->' in key or '.' in key) and                     re.split(r'->|\.', key)[0] in self.opaque:
                 # Поле непрозрачного объекта: величина есть, состав неизвестен.
                 self.vars[key] = (key, FLOAT64)
@@ -952,11 +953,42 @@ def macro_aliases(texts):
 
 
 _DEF_NUM = re.compile(
-    r"^\s*#\s*define\s+([A-Za-z_]\w*)\s+\(?\s*([-+]?(?:\d+\.\d*|\.\d+|\d+)(?:[eE][-+]?\d+)?)[fFlL]?\)?\s*$",
+    r"^\s*#\s*define\s+([A-Za-z_]\w*)\s+\(?\s*([-+]?(?:\d+\.\d*|\.\d+|\d+)(?:[eE][-+]?\d+)?)([fFlL]?)\)?\s*$",
     re.M)
 _GLOBAL = re.compile(
     r"^\s*(?:static\s+)?(?:const\s+)?([A-Za-z_]\w*)\s+([A-Za-z_]\w*)\s*=\s*"
-    r"([-+]?(?:\d+\.\d*|\.\d+|\d+)(?:[eE][-+]?\d+)?)[fFlL]?\s*;", re.M)
+    r"([-+]?(?:\d+\.\d*|\.\d+|\d+)(?:[eE][-+]?\d+)?)([fFlL]?)\s*;", re.M)
+
+
+class ConstTable(dict):
+    """Числовые константы файла вместе с их форматом.
+
+    Обычный dict, чтобы не ломать ни одного места, которое просто берёт значение,
+    плюс поле fmts с форматом там, где он известен из записи литерала.
+
+    Формат здесь не украшение. В box2d написано `2.0f * B2_PI * hertz`, где
+    B2_PI это `3.14159265359f`. Компилятор округляет произведение двух float-ов
+    до float32 ДО умножения на hertz, а мы держали константу в двойной точности
+    и округляли позже. Разница ровно в одном округлении — и она всплыла при
+    побитовой сверке с clang 06.10.2026. Это худший вид ошибки: граница верна,
+    но для выражения, которого в коде нет.
+    """
+
+    __slots__ = ('fmts',)
+
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self.fmts = {}
+
+
+def _suffixed(text, suffix, table, name, declared=None):
+    """Значение литерала с учётом суффикса: у `f` оно округляется к float32."""
+    value = float(text)
+    fmt = FLOAT32 if suffix in ('f', 'F') else declared
+    if fmt is FLOAT32:
+        value = FLOAT32.round(value)
+        table.fmts[name] = FLOAT32
+    return value
 
 
 def constants(texts, types):
@@ -967,14 +999,20 @@ def constants(texts, types):
     у которых значение — число прямо в объявлении: вычисляемое выражение или
     значение, присваиваемое где-то ещё, константой не является и сюда не попадает.
     """
-    out = {}
+    out = ConstTable()
     for src in texts:
         for m in _DEF_NUM.finditer(src):
-            out.setdefault(m.group(1), float(m.group(2)))
+            name, val, suffix = m.group(1), m.group(2), m.group(3)
+            if name in out:
+                continue
+            out[name] = _suffixed(val, suffix, out, name)
         for m in _GLOBAL.finditer(src):
-            tname, name, val = m.group(1), m.group(2), m.group(3)
+            tname, name, val, suffix = (m.group(1), m.group(2), m.group(3), m.group(4))
+            if name in out:
+                continue
             if tname in types or tname in ("int", "unsigned", "long", "short"):
-                out.setdefault(name, float(val))
+                fmt = FLOAT32 if types.get(tname) is FLOAT32 else None
+                out[name] = _suffixed(val, suffix, out, name, declared=fmt)
     return out
 
 
