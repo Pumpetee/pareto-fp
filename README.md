@@ -206,6 +206,7 @@ Twelve of the thirteen get a tighter bound; `verhulst` is already in its best fo
 
 - [docs/how-it-works.md](docs/how-it-works.md) — the pipeline, the compilation path through MLIR, how conditionals and mixed precision are handled, how the bound is verified, how loose it is and why, what the search costs, and the two times the bound lied.
 - [docs/real-projects.md](docs/real-projects.md) — run on three libraries nobody prepared for us (raylib, box2d, Chipmunk2D): what the front end accepts and what it refuses, two defects found in their code, how much tighter the bounds get, and the bit-for-bit check that our parse is the program clang compiles.
+- [docs/witnesses.md](docs/witnesses.md) — eleven concrete inputs on which a function in raylib, box2d or Chipmunk2D returns not a single correct digit, with the code's answer, the true value and the replacement. Checkable by substituting numbers, without trusting our upper bound.
 - [docs/comparison.md](docs/comparison.md) — measurements next to Herbie, FPTaylor and Daisy, and an explicit list of what in this project is not new.
 - [examples/](examples/) — four C files to run it on, each one making a different point.
 
