@@ -21,7 +21,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from pareto.api import analyse_c_function, safety_envelope
+from pareto.api import analyse_c_function, safety_envelope, domain_hazards
 from pareto.cfront import (CParseError, collect_context, functions,
                            constants, globals_of, macro_aliases,
                            make_resolver, parse_function)
@@ -59,11 +59,31 @@ def prog_tree(prog):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('path')
-    ap.add_argument('--range', default='-1e20..1e20')
+    ap.add_argument('--range', default='-1e20..1e20',
+                    help='диапазон по умолчанию для всех аргументов')
+    ap.add_argument('--arg', action='append', default=[], metavar='ИМЯ=НИЗ..ВЕРХ',
+                    help='диапазон для аргумента с таким именем; можно '
+                         'повторять. Сопоставление по имени параметра, '
+                         'а не по порядку')
 
     args = ap.parse_args()
 
     lo, hi = (float(x) for x in args.range.split('..'))
+    # Диапазон по имени параметра. Без этого обход живого проекта упирается в
+    # ложные тревоги: даёшь ±1e3 всем аргументам подряд — и получаешь честное
+    # «делитель накрывает ноль» на выражении 1 + 2*z*w + w*w, которое при реальных
+    # hertz > 0 и timeStep > 0 меньше единицы не бывает. Предупреждение верное,
+    # но про код, которого не существует. Диапазоны должен задавать тот, кто знает
+    # вызывающую сторону, а инструмент обязан дать такую возможность.
+    per_arg = {}
+    for item in args.arg:
+        if '=' not in item or '..' not in item:
+            raise SystemExit(f'не разобрал --arg {item!r}, нужно ИМЯ=НИЗ..ВЕРХ')
+        nm, rng = item.split('=', 1)
+        a_lo, a_hi = (float(x) for x in rng.split('..'))
+        if a_lo > a_hi:
+            raise SystemExit(f'у {nm} низ больше верха')
+        per_arg[nm.strip()] = (a_lo, a_hi)
     target = Path(args.path)
     src = target.read_text(encoding='utf-8', errors='replace')
     root = target.parent
@@ -86,13 +106,13 @@ def main():
     ctx = {'types': types, 'table': table, 'resolve': resolve, 'macros': macros,
            'consts': consts, 'globs': globs}
 
-    rows = []
+    rows, hazards = [], []
     for name in functions(src, types):
         try:
             prog = parse_function(src, name, types, table, resolve, macros, consts, globs)
         except Exception:
             continue
-        dom = {a: (lo, hi) for a in prog['args']}
+        dom = {a: per_arg.get(a, (lo, hi)) for a in prog['args']}
         try:
             res = analyse_c_function(src, name, dom=dom, ctx=ctx)
         except Exception as e:
@@ -107,6 +127,11 @@ def main():
             if f:
                 form = f
                 break
+        try:
+            for h in domain_hazards(prog_tree(prog), dom):
+                hazards.append((name, h))
+        except Exception:
+            pass
         env = None
         if written is None or not math.isfinite(written or math.inf):
             try:
@@ -118,10 +143,18 @@ def main():
 
     print(f'файл: {args.path}')
     print(f'диапазон для КАЖДОГО аргумента: [{lo:g}, {hi:g}]')
+    for nm in sorted(per_arg):
+        print(f'  кроме {nm}: [{per_arg[nm][0]:g}, {per_arg[nm][1]:g}]')
     print()
     bad = [r for r in rows if r[1] is None or not math.isfinite(r[1] or math.inf)]
     print(f'принятых функций: {len(rows)} | граница НЕ доказана как написано: {len(bad)}')
     print()
+    if hazards:
+        print('МОЖЕТ ВЕРНУТЬ НЕ ЧИСЛО:')
+        for name, h in hazards:
+            print(f'  {name}: {h["op"]} от {h["argument"]}')
+            print(f'    диапазон [{h["range"][0]:.3e}, {h["range"][1]:.3e}] — {h["why"]}')
+        print()
     print(f'{"функция":<24}{"как написано":>14}{"переписано":>14}{"безопасно до":>14}')
     for name, w, b, form, env in rows:
         ws = 'не доказана' if (w is None or not math.isfinite(w)) else f'{w:.3e}'

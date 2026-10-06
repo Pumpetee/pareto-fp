@@ -175,6 +175,70 @@ def precision_report(tree, dom, target=None, formats=('float32', 'float16')):
 
 
 # ---------- функция из файла ----------
+def domain_hazards(tree, dom):
+    """Места, где код вернёт не число, а NaN или бесконечность.
+
+    Отказ «границу доказать не удалось» честен, но человеку с ним делать нечего.
+    Полезен не отказ, а названная причина: вот эта строка, вот этот аргумент,
+    вот что он увидит. Такое уже можно поставить проверкой на входе или просто
+    починить.
+
+    Ищем ровно три вещи, каждая из которых в живом коде даёт не число:
+      - корень от значения, которое способно оказаться отрицательным;
+      - логарифм от неположительного;
+      - деление на величину, чей диапазон накрывает ноль.
+    Про корень спрашиваем форму записи, а не интервал: сумма квадратов имеет
+    нижний конец ноль, но отрицательной в IEEE-754 не бывает, и записывать её в
+    опасные было бы ложной тревогой.
+    """
+    from pareto.analysis import nonneg_computed, tree_cost, iv_abs_min
+    from pareto.codegen import to_c
+
+    out, seen = [], set()
+
+    def iv(node):
+        return tree_cost(node, dom)[2]
+
+    def walk(node):
+        if node[0] in ('num', 'var'):
+            return
+        for k in node[1:]:
+            if isinstance(k, tuple):
+                walk(k)
+        op = node[0]
+        try:
+            if op == 'sqrt':
+                lo, hi = iv(node[1])
+                if lo < 0.0 and not nonneg_computed(node[1], dom):
+                    add_hit('sqrt', node[1], lo, hi,
+                            'the argument can be negative, so the code returns NaN')
+            elif op == 'log':
+                lo, hi = iv(node[1])
+                if lo <= 0.0:
+                    add_hit('log', node[1], lo, hi,
+                            'the argument can be zero or negative, so the code returns '
+                            '-inf or NaN')
+            elif op == '/':
+                lo, hi = iv(node[2])
+                if iv_abs_min((lo, hi)) == 0.0:
+                    add_hit('/', node[2], lo, hi,
+                            'the divisor range covers zero, so the code returns inf '
+                            'or NaN')
+        except (ValueError, ZeroDivisionError, OverflowError, KeyError):
+            return
+
+    def add_hit(op, arg, lo, hi, why):
+        text = to_c(arg)
+        key = (op, text)
+        if key in seen:
+            return
+        seen.add(key)
+        out.append({'op': op, 'argument': text, 'range': (lo, hi), 'why': why})
+
+    walk(tree)
+    return out
+
+
 def safety_envelope(tree, dom, limit=None, steps=40, floor=1e-300):
     """До какой величины входов граница ещё доказуема.
 

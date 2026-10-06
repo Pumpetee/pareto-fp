@@ -30,7 +30,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from pareto import budget as _budget
 from pareto.api import (analyse_c_function, analyse_expression, check_requirement,
-                        safety_envelope,
+                        safety_envelope, domain_hazards,
                         precision_report, rewritten_c)
 from pareto.apply import rewrite_source, unified_diff
 from pareto.cfront import CParseError
@@ -298,6 +298,23 @@ def render_requirement(q):
     return out
 
 
+def render_hazards(hits):
+    """Опасные места — прямым текстом, с аргументом и его диапазоном.
+
+    Это единственная часть отчёта, которая говорит не про точность, а про то,
+    вернёт ли код вообще число. Поэтому печатается она выше всех чисел: толку
+    обсуждать знаки после запятой там, где получится NaN, нет никакого.
+    """
+    out = ['WARNING: on these ranges the code can return a non-number:']
+    for h in hits:
+        out.append('  {} of {}'.format(h['op'], h['argument']))
+        out.append('    range [{:.3e}, {:.3e}] - {}'.format(
+            h['range'][0], h['range'][1], h['why']))
+    out.append('  Narrow the ranges to the values the code really sees, or guard the '
+               'input. Until then no error bound below is meaningful.')
+    return out
+
+
 def render_envelope(e):
     """«До какой величины входов это безопасно» — человеческим языком.
 
@@ -334,6 +351,10 @@ def _run_expr(a):
     if a.precision or a.target is not None:
         r['precision'] = precision_report(tree, dom, target=a.target)
     r['cut'] = _budget.cut_stages()
+    try:
+        r['hazards'] = domain_hazards(tree, dom)
+    except Exception:
+        r['hazards'] = []
     if a.envelope:
         k, full = safety_envelope(tree, dom, limit=a.require)
         r['envelope'] = {'scale': k, 'covers_domain': full,
@@ -355,6 +376,8 @@ def _run_expr(a):
         print(json.dumps(r, ensure_ascii=False, indent=2))
     else:
         text = render(r)
+        if r.get('hazards'):
+            text = (chr(10).join(render_hazards(r['hazards'])) + chr(10) * 2 + text)
         if r.get('envelope'):
             text += chr(10) + chr(10).join(render_envelope(r['envelope']))
         if r.get('requirement'):
