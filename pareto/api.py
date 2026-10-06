@@ -7,6 +7,7 @@
 from __future__ import annotations
 
 import math
+import time as _time
 
 from pareto import budget as _budget
 from pareto.analysis import (combined_bound, pareto_extract, refine_front,
@@ -24,6 +25,12 @@ INF = float('inf')
 
 
 # ---------- одно выражение ----------
+# Сколько секунд даётся насыщению, когда бюджет не задан снаружи.
+# Лучше чуть более слабая граница за полминуты, чем точная за шесть
+# минут: отчёт отдельной строкой говорит, что этап был обрезан.
+SATURATE_SECONDS = 30.0
+
+
 def search_front(tree, dom, keep=10, iters=10, refine=True, out_round=None):
     """Фронт Парето для выражения. Возвращает список (стоимость, граница, дерево).
 
@@ -43,10 +50,51 @@ def search_front(tree, dom, keep=10, iters=10, refine=True, out_round=None):
     # Поиску отдаём не весь остаток, а половину: извлечение фронта и пересчёт границ
     # тоже стоят времени, и если насыщение съест весь бюджет, отдавать будет нечего.
     left = _budget.remaining()
-    eg.saturate(RULES, iters=iters, domain=dom,
-                time_budget=max(0.1, min(20.0, left * 0.5))
-                if math.isfinite(left) else None)
-    front, _ = pareto_extract(eg, root, dom, keep=keep)
+    cap = (max(0.1, min(20.0, left * 0.5)) if math.isfinite(left) else None)
+
+    # Круги насыщения идут ПО ОДНОМУ, и останавливает их не счётчик, а часы.
+    #
+    # Фиксированное число кругов стоило дорого и зря: на carbonGas граница выходит
+    # на 3.370802e-09 к пятому кругу, шестой добавляет 8 секунд и ничего, седьмой —
+    # 365 секунд и ничего. Весь разбор занимал 332 секунды вместо полутора, причём
+    # с тем же ответом до последней цифры.
+    #
+    # Но останавливаться на первом же круге без улучшения оказалось нельзя:
+    # продвижение немонотонно. Круг может не улучшить границу и при этом подготовить
+    # следующий, который улучшит. Проверка на тринадцати эталонных случаях показала
+    # ровно это — пять границ ухудшились, turbine3 на 32%. Платить точностью за
+    # скорость здесь недопустимо: на этих границах стоит всё сравнение с чужими
+    # инструментами.
+    #
+    # Поэтому терпение три круга, а дорогой случай режут часы. Так turbine и sine
+    # получают свои круги (они дешёвые), а carbonGas обрывается по времени — на том
+    # круге, где его граница уже наилучшая.
+    deadline = _budget.remaining()
+    if not math.isfinite(deadline):
+        deadline = SATURATE_SECONDS
+    started = _time.monotonic()
+
+    front, best_err, idle = None, None, 0
+    for _ in range(max(1, iters)):
+        size_before = eg.size()
+        spent = _time.monotonic() - started
+        if spent >= deadline:
+            _budget.note('saturation rounds')
+            break
+        eg.saturate(RULES, iters=1, domain=dom,
+                    time_budget=max(0.1, min(cap or deadline, deadline - spent)))
+        front, _ = pareto_extract(eg, root, dom, keep=keep)
+        cur = min((p[1] for p in front), default=None)
+        if cur is not None and (best_err is None or cur < best_err * 0.999):
+            best_err, idle = cur, 0
+        else:
+            idle += 1
+            if idle >= 3:
+                break
+        if eg.size() == size_before:
+            break           # граф перестал расти: дальше круги ничего не дадут
+    if front is None:
+        front, _ = pareto_extract(eg, root, dom, keep=keep)
     if refine:
         front = refine_front(front, dom)
 
