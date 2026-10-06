@@ -175,6 +175,66 @@ def precision_report(tree, dom, target=None, formats=('float32', 'float16')):
 
 
 # ---------- функция из файла ----------
+def safety_envelope(tree, dom, limit=None, steps=40, floor=1e-300):
+    """До какой величины входов граница ещё доказуема.
+
+    «Не могу доказать на ваших диапазонах» — ответ формально честный и почти
+    бесполезный. Полезный звучит иначе: «до такой величины ваш код безопасен, за
+    ней — нет». Это и есть то, что человек положит в документацию или в проверку
+    на входе.
+
+    Ищем наибольший множитель k, при котором диапазоны, сжатые в k раз, ещё дают
+    конечную границу (а если задан предел — то и укладываются в него). Сначала
+    спускаемся по десятичной лестнице до первого успеха, потом уточняем деление
+    пополам по порядку величины.
+
+    Пола пробы жёстким числом быть не может: при диапазонах порядка 1e200 сжатие
+    даже в миллиард раз ничего не меняет, и фиксированный пол 1e-12 выдавал
+    проблему величины за проблему формы. Поэтому спуск идёт до предела самого
+    формата.
+
+    Отдаётся (k, covers_domain). Это НАЙДЕННАЯ огибающая, а не доказанный
+    максимум: монотонности в общем случае нет, внутри k проверено, снаружи —
+    не проверено.
+    """
+    import math as _m
+    from pareto.analysis import tree_cost_refined
+
+    def ok(k):
+        d = {v: (lo * k, hi * k) for v, (lo, hi) in dom.items()}
+        try:
+            b = tree_cost_refined(tree, d)[1]
+        except (ValueError, ZeroDivisionError, OverflowError, KeyError):
+            return False
+        if not _m.isfinite(b):
+            return False
+        return True if limit is None else b <= limit
+
+    if ok(1.0):
+        return 1.0, True                      # на заданных диапазонах уже доказуемо
+
+    hi, lo = 1.0, None                        # hi — не доказано, lo — доказано
+    k = 1.0
+    while k > floor:
+        k /= 1e3
+        if ok(k):
+            lo = k
+            break
+        hi = k
+    if lo is None:
+        return 0.0, False                     # дело в форме выражения, не в величине
+
+    for _ in range(steps):
+        mid = _m.sqrt(lo * hi)
+        if not (lo < mid < hi):
+            break
+        if ok(mid):
+            lo = mid
+        else:
+            hi = mid
+    return lo, False
+
+
 def analyse_c_function(src, name=None, dom=None, keep=8, iters=8, refine=True,
                        optimise=True, max_boxes=32, ctx=None):
     """Разбор функции на C: пути, границы, переписанные ветки.

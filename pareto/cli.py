@@ -30,6 +30,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from pareto import budget as _budget
 from pareto.api import (analyse_c_function, analyse_expression, check_requirement,
+                        safety_envelope,
                         precision_report, rewritten_c)
 from pareto.apply import rewrite_source, unified_diff
 from pareto.cfront import CParseError
@@ -90,12 +91,20 @@ def render(r):
     out.append('cheapest form   : {}'.format(fa['form']))
     out.append('                  {:.2f}x cheaper, error bound {:.3e}'.format(speed, fa['err']))
     out.append('most accurate   : {}'.format(ex['form']))
-    if b['err'] > 0 and ex['err'] > 0:
+    cost_ratio = (ex['cost'] / b['cost']) if b['cost'] else 1.0
+    import math as _m
+    if not (_m.isfinite(b['err']) and _m.isfinite(ex['err'])):
+        # Обе границы бесконечны — делить их друг на друга дало бы «nanx smaller»,
+        # то есть вместо честного «доказать не удалось» читатель получал бы мусор
+        # с видом результата. Такое уже исправлено ниже для функций, а здесь, в
+        # разборе выражения, тот же случай оставался нетронутым.
+        out.append('                  the bound could not be established for either '
+                   'form, so there is nothing to compare')
+    elif b['err'] > 0 and ex['err'] > 0:
         out.append('                  bound {:.3g}x smaller, costs {:.2f}x'.format(
-            b['err'] / ex['err'], (ex['cost'] / b['cost']) if b['cost'] else 1.0))
+            b['err'] / ex['err'], cost_ratio))
     elif ex['err'] == 0:
-        out.append('                  model error is zero, costs {:.2f}x'.format(
-            (ex['cost'] / b['cost']) if b['cost'] else 1.0))
+        out.append('                  model error is zero, costs {:.2f}x'.format(cost_ratio))
     out += ['', 'paste into code : ' + fa['c']]
     if r.get('precision'):
         out += [''] + render_precision(r['precision'])
@@ -219,6 +228,9 @@ def main(argv=None):
     ap.add_argument('--no-refine', action='store_true',
                     help='skip domain branching (faster, looser bound)')
     ap.add_argument('--json', action='store_true', help='machine-readable output')
+    ap.add_argument('--envelope', action='store_true',
+                    help='find the largest input magnitude at which the bound is still '
+                         'provable, and report it')
     ap.add_argument('--require', type=float, default=None, metavar='BOUND',
                     help='check that the error provably stays under this value and say so '
                          'with the exit code: 0 the code as written already does, 1 it does '
@@ -286,6 +298,30 @@ def render_requirement(q):
     return out
 
 
+def render_envelope(e):
+    """«До какой величины входов это безопасно» — человеческим языком.
+
+    Отдельная функция, потому что формулировка здесь важнее чисел: сказать
+    «граница найдена» там, где мы проверили лишь суженные диапазоны, значит
+    соврать. Поэтому вслух говорится ровно то, что сделано: внутри проверено,
+    снаружи — нет.
+    """
+    k, full = e['scale'], e['covers_domain']
+    if full:
+        return ['safety envelope : the bound already holds on the ranges you gave']
+    if k <= 0.0:
+        return ['safety envelope : not provable even on ranges a trillion times '
+                'narrower, so the problem is the shape of the expression, not the size '
+                'of the inputs']
+    out = ['safety envelope : proven down to {:.3g} of the ranges you gave'.format(k),
+           '                  i.e. for each input within:']
+    for v, (lo, hi) in sorted(e['domain'].items()):
+        out.append('                    {} in [{:.3e}, {:.3e}]'.format(v, lo, hi))
+    out.append('                  outside that it is NOT proven - it is unchecked, '
+               'not known to be wrong')
+    return out
+
+
 def _run_expr(a):
     try:
         tree = parse(a.expr)
@@ -298,6 +334,11 @@ def _run_expr(a):
     if a.precision or a.target is not None:
         r['precision'] = precision_report(tree, dom, target=a.target)
     r['cut'] = _budget.cut_stages()
+    if a.envelope:
+        k, full = safety_envelope(tree, dom, limit=a.require)
+        r['envelope'] = {'scale': k, 'covers_domain': full,
+                         'limit': a.require,
+                         'domain': {v: (lo * k, hi * k) for v, (lo, hi) in dom.items()}}
 
     code = 0
     if a.require is not None:
@@ -314,6 +355,8 @@ def _run_expr(a):
         print(json.dumps(r, ensure_ascii=False, indent=2))
     else:
         text = render(r)
+        if r.get('envelope'):
+            text += chr(10) + chr(10).join(render_envelope(r['envelope']))
         if r.get('requirement'):
             text += '\n' + '\n'.join(render_requirement(r['requirement']))
         print(text)
