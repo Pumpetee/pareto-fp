@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import argparse
 import math
+import os
+import shutil
 import random
 import re
 import struct
@@ -32,7 +34,29 @@ from pareto.cfront import (collect_context, constants, functions, globals_of,
 from pareto.evalfp import eval_float
 from pareto.precision import FLOAT32, FLOAT64
 
-CLANG = r'C:\Program Files\LLVM\bin\clang.exe'
+def find_clang():
+    """Путь к компилятору: переменная среды, затем PATH, затем обычные места.
+
+    Жёсткий путь годился ровно до первой чужой машины. Сверка с компилятором
+    должна проверяться не у меня, а в CI, иначе это не доказательство, а моё
+    слово.
+    """
+    env = os.environ.get('PARETO_CLANG')
+    if env and Path(env).exists():
+        return env
+    for name in ('clang', 'clang-18', 'clang-17', 'gcc', 'cc'):
+        found = shutil.which(name)
+        if found:
+            return found
+    for guess in (os.path.join('C:' + os.sep, 'Program Files', 'LLVM', 'bin',
+                               'clang.exe'),
+                  os.path.join('C:' + os.sep, 'msys64', 'mingw64', 'bin', 'gcc.exe')):
+        if Path(guess).exists():
+            return guess
+    return None
+
+
+CLANG = find_clang()
 
 HARNESS = r'''#include <stdio.h>
 #include <stdlib.h>
@@ -184,10 +208,13 @@ def main():
     ap.add_argument('--range', default='-1e3..1e3')
     ap.add_argument('--cases', type=int, default=120)
     ap.add_argument('--seed', type=int, default=20261006)
+    ap.add_argument('--why', action='store_true',
+                    help='показывать, почему функция пропущена')
     a = ap.parse_args()
 
-    if not Path(CLANG).exists():
-        raise SystemExit('clang не найден: ' + CLANG)
+    if not CLANG:
+        raise SystemExit('компилятор не найден: укажите PARETO_CLANG или '
+                         'поставьте clang в PATH')
     lo, hi = (float(x) for x in a.range.split('..'))
     random.seed(a.seed)
 
@@ -216,7 +243,7 @@ def main():
                 | {k for k, v in types.items() if v is FLOAT64})
 
     print('файл:', target)
-    print('судья: clang, сравнение побитовое')
+    print('судья:', CLANG, '| сравнение побитовое')
     print('диапазон входов: [{:g}, {:g}], случаев на функцию: {}'.format(lo, hi, a.cases))
     print()
 
@@ -255,12 +282,17 @@ def main():
             'fmt': '%08x' if out_width == 4 else '%016llx',
         }
         cfile = tmp / (name + '.c')
-        exe = tmp / (name + '.exe')
+        exe = tmp / (name + ('.exe' if os.name == 'nt' else ''))
         cfile.write_text(code, encoding='utf-8')
-        r = subprocess.run([CLANG, str(cfile), '-O0', '-I', str(target.parent),
-                            '-o', str(exe)], capture_output=True, text=True)
+        cmd = [CLANG, str(cfile), '-O0', '-I', str(target.parent), '-o', str(exe)]
+        if os.name != 'nt':
+            cmd.append('-lm')               # на Linux libm подключается явно
+        r = subprocess.run(cmd, capture_output=True, text=True)
         if r.returncode != 0:
             skipped += 1
+            if a.why:
+                print('{:<26} не собралось: {}'.format(
+                    name, (r.stderr or '').strip().splitlines()[:1]))
             continue
 
         mism = None

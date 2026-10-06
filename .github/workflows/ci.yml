@@ -236,3 +236,33 @@ jobs:
           path: |
             bench/rivals_report.txt
             bench/rivals_results.json
+
+  # Самая опасная ошибка такого инструмента — разбор НЕ ТОЙ программы, что
+  # написана. Граница тогда верна для выражения, которого в коде нет, и ни один
+  # наш тест этого не покажет: мы сами себе судья. Поэтому судья берётся снаружи
+  # и не на машине автора: три живые библиотеки клонируются здесь, их функции
+  # компилируются clang-ом как есть и сравниваются с нашим разбором ПОБИТОВО.
+  # Эта проверка уже нашла настоящий дефект — потерянный суффикс f у #define,
+  # из-за которого 2.0f * B2_PI в box2d округлялось на один раз позже, чем в C.
+  parse-matches-clang:
+    name: our parse must match clang bit for bit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: clang version
+        run: clang --version
+      - name: fetch the three libraries
+        run: |
+          set -eu
+          git clone --depth 1 https://github.com/raysan5/raylib.git ../_scan_raylib
+          git clone --depth 1 https://github.com/erincatto/box2d.git ../_scan_box2d
+          git clone --depth 1 https://github.com/slembcke/Chipmunk2D.git ../_scan_chipmunk
+      - name: raylib
+        run: python tools/difftest_c.py ../_scan_raylib/src/raymath.h --cases 60
+      - name: box2d
+        run: python tools/difftest_c.py ../_scan_box2d/include/box2d/math_functions.h --cases 60
+      - name: Chipmunk2D
+        run: python tools/difftest_c.py ../_scan_chipmunk/include/chipmunk/cpVect.h --cases 60
