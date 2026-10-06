@@ -144,6 +144,50 @@ def iv_div(a, b):
     return (min(c), max(c))
 
 
+def nonneg_computed(tree, domain):
+    """Доказуемо ли, что ВЫЧИСЛЕННОЕ значение выражения неотрицательно.
+
+    Вопрос не тот же, что «неотрицательно ли истинное значение». Под корнем может
+    стоять формула, математически неотрицательная всюду, но в арифметике с
+    округлением проскакивающая ниже нуля — и тогда живой код отдаёт NaN, а никакую
+    не границу. Поэтому судим по форме записи, а не по интервалу: из чего собрано
+    выражение, то и гарантировано.
+
+    Проверка намеренно грубая и односторонняя: «да» значит доказано, «нет» значит
+    не доказано, а не опровергнуто. Сумма и произведение неотрицательных в IEEE-754
+    неотрицательны (округление монотонно и ноль сохраняется), квадрат неотрицателен,
+    корень и модуль тоже. Вычитание в список не входит никогда — именно оно и
+    уводит под ноль.
+    """
+    op = tree[0]
+    if op in ('f32', 'f16'):
+        return nonneg_computed(tree[1], domain)
+    if op == 'num':
+        return float(tree[1]) >= 0.0
+    if op == 'var':
+        return domain.get(tree[1], (-INF, INF))[0] >= 0.0
+    if op in ('fabs', 'sqrt'):
+        return True
+    if op == 'exp':
+        return True
+    if op == '*':
+        if tree[1] == tree[2]:
+            return True                      # квадрат
+        return (nonneg_computed(tree[1], domain)
+                and nonneg_computed(tree[2], domain))
+    if op in ('+', 'fmin', 'fmax'):
+        return (nonneg_computed(tree[1], domain)
+                and nonneg_computed(tree[2], domain))
+    if op == '/':
+        return (nonneg_computed(tree[1], domain)
+                and nonneg_computed(tree[2], domain))
+    if op == 'fma':
+        return (nonneg_computed(tree[1], domain)
+                and nonneg_computed(tree[2], domain)
+                and nonneg_computed(tree[3], domain))
+    return False
+
+
 def iv_sqrt(a):
     if a[1] < 0:
         return (float('nan'), float('nan'))
@@ -408,7 +452,8 @@ def exact_op(tree, kid_ivs, kid_errs, out_iv):
     return False
 
 
-def propagate_error(op, kid_ivs, kid_errs, out_iv, round_scale=1.0):
+def propagate_error(op, kid_ivs, kid_errs, out_iv, round_scale=1.0,
+                    arg_trees=None, domain=None):
     """Верхняя граница АБСОЛЮТНОЙ ошибки результата.
 
     Модель стандартная: каждая операция в binary64 даёт относительную
@@ -452,9 +497,38 @@ def propagate_error(op, kid_ivs, kid_errs, out_iv, round_scale=1.0):
         return (kid_errs[0] * iv_abs_max(b) + iv_abs_max(a) * kid_errs[1]) / (bmin * bmin) + round_off
     if op == 'sqrt':
         amin = iv_abs_min(kid_ivs[0])
+        e = kid_errs[0]
+        # Сначала вопрос, который важнее любой точности: а не отдаст ли живой код
+        # здесь вовсе не число. Интервальный корень зажимает отрицательное в ноль,
+        # и из-за этого на sqrt(x - y) при x, y из [0, 1] инструмент уверенно
+        # печатал границу 1.05e-08 — при том что для y > x настоящий код
+        # возвращает NaN. Уверенная цифра на месте NaN хуже отказа.
+        #
+        # Отказывать по одному лишь отрицательному концу интервала нельзя: сумма
+        # квадратов имеет нижний конец ноль, ошибку больше нуля, но отрицательной
+        # в IEEE-754 не бывает никогда. Поэтому спрашиваем про форму записи.
+        if (kid_ivs[0][0] < 0.0 and arg_trees is not None
+                and domain is not None
+                and not nonneg_computed(arg_trees[0], domain)):
+            return INF
+        # Производная sqrt в нуле бесконечна, поэтому обычный перенос ошибки через
+        # множитель 1/(2*sqrt(a)) на диапазоне, касающемся нуля, давал INF. Из-за
+        # одного этого места все функции длины и расстояния в чужих проектах
+        # оказывались «границу доказать не удалось» — а они как раз и считаются от
+        # нуля.
+        #
+        # Но у корня есть второе свойство, которое мы не использовали: он гёльдеров
+        # с показателем 1/2. Из (sqrt(a) + sqrt(e))^2 = a + 2*sqrt(a*e) + e >= a + e
+        # следует sqrt(a + e) <= sqrt(a) + sqrt(e), и симметрично вниз. То есть
+        # перенос ошибки через корень НИКОГДА не превосходит sqrt(e), как близко к
+        # нулю ни лежал бы аргумент.
+        #
+        # Обе оценки верхние, поэтому меньшая из них тоже верхняя: вблизи нуля
+        # работает гёльдерова, вдали — производная, и бесконечность уходит совсем.
+        holder = math.sqrt(e) if e > 0 else 0.0
         if amin == 0.0:
-            return INF if kid_errs[0] > 0 else round_off
-        return kid_errs[0] / (2.0 * math.sqrt(amin)) + round_off
+            return holder + round_off
+        return min(e / (2.0 * math.sqrt(amin)), holder) + round_off
     if op == 'exp':
         return iv_abs_max(out_iv) * kid_errs[0] + round_off
     if op == 'log':
@@ -603,7 +677,8 @@ def partial_cost(tree, domain, depth):
     kids = [partial_cost(k, domain, depth - 1) for k in tree[1:]]
     ivs = [k[2] for k in kids]
     out_iv = eval_interval(op, ivs)
-    err = propagate_error(op, ivs, [k[1] for k in kids], out_iv, round_scale=0.0)
+    err = propagate_error(op, ivs, [k[1] for k in kids], out_iv, round_scale=0.0,
+                          arg_trees=tree[1:], domain=domain)
     work = COST[op] + sum(k[3] for k in kids)
     lat = COST[op] + max(k[4] for k in kids)
     return work + lat, err, out_iv, work, lat
@@ -674,7 +749,8 @@ def tree_cost(tree, domain):
     out_iv = tighten(tree, domain, out_iv)
     errs = [k[1] for k in kids]
     scale = 0.0 if exact_op(tree, ivs, errs, out_iv) else 1.0
-    err = propagate_error(op, ivs, errs, out_iv, round_scale=scale)
+    err = propagate_error(op, ivs, errs, out_iv, round_scale=scale,
+                          arg_trees=tree[1:], domain=domain)
     work = COST[op] + sum(k[3] for k in kids)
     lat = COST[op] + max(k[4] for k in kids)
     return work + lat, err, out_iv, work, lat
@@ -970,7 +1046,9 @@ def pareto_extract(eg, root, domain, keep=8, rounds=10, series=True):
                         lat = COST[op] + max(c[4] for c in combo)
                         cost = work + lat
                         try:
-                            err = propagate_error(op, kid_ivs, [c[1] for c in combo], out_iv)
+                            err = propagate_error(
+                                op, kid_ivs, [c[1] for c in combo], out_iv,
+                                arg_trees=[c[2] for c in combo], domain=domain)
                         except (ValueError, ZeroDivisionError, OverflowError):
                             continue
                         cand.append((cost, err, (op,) + tuple(c[2] for c in combo), work, lat))
