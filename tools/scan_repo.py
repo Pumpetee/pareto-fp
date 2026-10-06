@@ -50,6 +50,38 @@ def reason_key(msg):
     return msg[:60]
 
 
+ARITH = {'+', '-', '*', '/', 'fma', 'sqrt', 'exp', 'log', 'expm1', 'log1p',
+         'sin', 'cos', 'atan', 'atan2', 'hypot', 'neg'}
+
+
+def counts_arithmetic(prog):
+    """Есть ли в функции хоть одно вычисление.
+
+    Без этого вопроса цифра охвата лжёт в нашу пользу. Половина принятого в
+    Chipmunk — это `return body->m`: чтение поля, ни одной операции, ошибка
+    тождественно ноль. Такая функция проходит фронтенд и попадает в счёт, но
+    доказывать в ней нечего, и покупателю она не говорит ничего. Честная цифра —
+    доля функций, в которых есть что считать.
+    """
+    def walk(node):
+        if not isinstance(node, tuple):
+            return False
+        if node[0] in ARITH:
+            return True
+        return any(walk(k) for k in node[1:])
+
+    for st in prog['stmts']:
+        if st[0] == 'let':
+            t = st[2].tree if hasattr(st[2], 'tree') else st[2]
+            if walk(t):
+                return True
+        elif st[0] == 'return' and walk(st[1]):
+            return True
+        elif st[0] not in ('let', 'return'):
+            return True                 # ветвление или цикл — уже не чтение поля
+    return False
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('repo')
@@ -81,7 +113,7 @@ def main():
     print(f'структур найдено: {len(table)}')
     print()
 
-    ok, bad = [], []
+    ok, bad, trivial = [], [], []
     reasons = collections.Counter()
     seen = 0
 
@@ -99,8 +131,11 @@ def main():
             if args.limit and seen > args.limit:
                 break
             try:
-                parse_function(src, name, types, table, resolve, macros, consts, globs)
+                prog = parse_function(src, name, types, table, resolve,
+                                      macros, consts, globs)
                 ok.append((f.relative_to(root), name))
+                if not counts_arithmetic(prog):
+                    trivial.append((f.relative_to(root), name))
             except CParseError as e:
                 bad.append((f.relative_to(root), name, str(e)))
                 reasons[reason_key(str(e))] += 1
@@ -115,6 +150,11 @@ def main():
     print(f'функций найдено:    {total}')
     if total:
         print(f'принято:            {len(ok)}  ({100.0 * len(ok) / total:.1f}%)')
+        real = len(ok) - len(trivial)
+        print(f'  из них со вычислениями: {real}  '
+              f'({100.0 * real / total:.1f}% от всех)')
+        print(f'  чтение поля без вычислений: {len(trivial)}  '
+              '— проходят фронтенд, но доказывать в них нечего')
         print(f'отклонено:          {len(bad)}')
     print()
     print('почему отказ:')

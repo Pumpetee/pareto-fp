@@ -202,79 +202,51 @@ def tree_of(prog):
     return walk(result)
 
 
-def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument('path')
-    ap.add_argument('--range', default='-1e3..1e3')
-    ap.add_argument('--cases', type=int, default=120)
-    ap.add_argument('--seed', type=int, default=20261006)
-    ap.add_argument('--why', action='store_true',
-                    help='показывать, почему функция пропущена')
-    a = ap.parse_args()
-
-    if not CLANG:
-        raise SystemExit('компилятор не найден: укажите PARETO_CLANG или '
-                         'поставьте clang в PATH')
-    lo, hi = (float(x) for x in a.range.split('..'))
-    random.seed(a.seed)
-
-    target = Path(a.path)
-    src = target.read_text(encoding='utf-8', errors='replace')
-    root = target.parent
-    for _ in range(3):
-        if (root.parent / 'include').exists() or (root.parent / 'src').exists():
-            root = root.parent
-    pool = [p for p in root.rglob('*') if p.suffix in ('.c', '.h')] or [target]
-    types, table = collect_context(pool)
-    texts = []
-    for f in pool:
-        try:
-            texts.append(f.read_text(encoding='utf-8', errors='replace'))
-        except OSError:
-            pass
-    macros = macro_aliases(texts)
-    consts = constants(texts, types)
-    globs = globals_of(texts, types, table)
-    resolve = make_resolver(texts, types, table, macros=macros, consts=consts,
-                            globs=globs)
-
-    scalar32 = {'float'} | {k for k, v in types.items() if v is FLOAT32}
-    scalar64 = ({'double', 'long double'}
-                | {k for k, v in types.items() if v is FLOAT64})
-
-    print('файл:', target)
-    print('судья:', CLANG, '| сравнение побитовое')
-    print('диапазон входов: [{:g}, {:g}], случаев на функцию: {}'.format(lo, hi, a.cases))
-    print()
-
-    tmp = Path(tempfile.mkdtemp(prefix='difftest_'))
+def run_file(target, ctx, a, lo, hi, tmp, inc_args=(), label=''):
+    """Сверить все пригодные функции одного файла. Возвращает (сверено, пропущено, расхождения)."""
+    try:
+        src = target.read_text(encoding='utf-8', errors='replace')
+    except OSError:
+        return 0, 0, []
     checked = skipped = 0
     bad = []
-    for name in functions(src, types):
+    # Причины пропуска считаем по видам. «Пропущено 31» — число, с которым нечего
+    # делать: непонятно, упираемся мы в сборку стенда, в тип возврата или в
+    # ветвление. Разбивка превращает это в список работ.
+    why = ctx.setdefault('why', {})
+
+    def skip(reason):
+        why[reason] = why.get(reason, 0) + 1
+
+    for name in functions(src, ctx['types']):
         try:
-            prog = parse_function(src, name, types, table, resolve, macros, consts, globs)
+            prog = parse_function(src, name, ctx['types'], ctx['table'], ctx['resolve'], ctx['macros'], ctx['consts'], ctx['globs'])
         except Exception:
             continue
         if any(st[0] not in ('let', 'return') for st in prog['stmts']):
             skipped += 1
+            skip('ветвление в теле')
             continue
         ret, params = signature(src, name)
         if not params:
             skipped += 1
+            skip('подпись не разобрана')
             continue
         built = build_case(name, ret, params, prog['args'],
-                           scalar32, scalar64)
+                           ctx['scalar32'], ctx['scalar64'])
         if built is None:
             skipped += 1
+            skip('тип возврата или параметра не скалярный')
             continue
         decls, call, order, ret_c, out_width = built
         tree = tree_of(prog)
         if tree is None:
             skipped += 1
+            skip('нет возврата')
             continue
 
         code = HARNESS % {
-            'header': target.name,
+            'header': target.as_posix(),
             'decls': (chr(10) + '    ').join(decls),
             'call': call,
             'rettype': ret_c,
@@ -284,15 +256,18 @@ def main():
         cfile = tmp / (name + '.c')
         exe = tmp / (name + ('.exe' if os.name == 'nt' else ''))
         cfile.write_text(code, encoding='utf-8')
-        cmd = [CLANG, str(cfile), '-O0', '-I', str(target.parent), '-o', str(exe)]
+        cmd = [CLANG, str(cfile), '-O0', '-I', str(target.parent),
+               *inc_args, '-o', str(exe)]
         if os.name != 'nt':
             cmd.append('-lm')               # на Linux libm подключается явно
         r = subprocess.run(cmd, capture_output=True, text=True)
         if r.returncode != 0:
             skipped += 1
+            skip('стенд не собрался')
             if a.why:
-                print('{:<26} не собралось: {}'.format(
-                    name, (r.stderr or '').strip().splitlines()[:1]))
+                print('{:<26} не собралось:'.format(name))
+                for ln in (r.stderr or '').strip().splitlines()[:6]:
+                    print('      ' + ln)
             continue
 
         mism = None
@@ -330,14 +305,113 @@ def main():
                 mism = (dict(vals), repr(ours), repr(c_val))
                 break
         checked += 1
-        print('{:<26} {}'.format(name, 'совпало побитово' if mism is None
-                                 else 'РАСХОЖДЕНИЕ'))
+        if not a.quiet:
+            print('{:<26} {}'.format(label + name, 'совпало побитово' if mism is None
+                                     else 'РАСХОЖДЕНИЕ'))
         if mism is not None:
             bad.append((name,) + mism)
+
+    return checked, skipped, bad
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument('path', help='файл .c/.h или корень проекта')
+    ap.add_argument('--range', default='-1e3..1e3')
+    ap.add_argument('--cases', type=int, default=120)
+    ap.add_argument('--seed', type=int, default=20261006)
+    ap.add_argument('--why', action='store_true',
+                    help='показывать, почему функция пропущена')
+    ap.add_argument('--quiet', action='store_true',
+                    help='печатать только расхождения и итог')
+    a = ap.parse_args()
+
+    if not CLANG:
+        raise SystemExit('компилятор не найден: укажите PARETO_CLANG или '
+                         'поставьте clang в PATH')
+    lo, hi = (float(x) for x in a.range.split('..'))
+    random.seed(a.seed)
+
+    given = Path(a.path)
+    whole_repo = given.is_dir()
+    # Проект целиком, а не один заголовок. Повод прямой: инструмент принимает в
+    # трёх библиотеках 155 функций, а с компилятором было сверено 37. Остальные
+    # 118 никто снаружи не проверял — и ровно в этом разрыве и живёт самая опасная
+    # ошибка: разбор не той программы, что написана.
+    SKIP_DIRS = {'demo', 'demos', 'test', 'tests', 'example', 'examples',
+                 'extern', 'external', 'third_party', 'vendor', 'build',
+                 'benchmark', 'benchmarks', 'samples'}
+    if whole_repo:
+        root = given
+        targets = sorted(
+            p for p in root.rglob('*')
+            if p.suffix in ('.c', '.h')
+            # Демо и тесты в счёт не идут: судим библиотеку, а не её примеры.
+            # Иначе половина отказов приходит из sokol-а, приложенного к
+            # Chipmunk-у для показа, и картина перестаёт быть про библиотеку.
+            and not (SKIP_DIRS & {part.lower() for part in p.relative_to(root).parts}))
+    else:
+        root = given.parent
+        for _ in range(3):
+            if (root.parent / 'include').exists() or (root.parent / 'src').exists():
+                root = root.parent
+        targets = [given]
+
+    pool = [p for p in root.rglob('*') if p.suffix in ('.c', '.h')] or targets
+    types, table = collect_context(pool)
+    texts = []
+    for f in pool:
+        try:
+            texts.append(f.read_text(encoding='utf-8', errors='replace'))
+        except OSError:
+            pass
+    macros = macro_aliases(texts)
+    consts = constants(texts, types)
+    globs = globals_of(texts, types, table)
+    resolve = make_resolver(texts, types, table, macros=macros, consts=consts,
+                            globs=globs)
+
+    ctx = {
+        'types': types, 'table': table, 'resolve': resolve, 'macros': macros,
+        'consts': consts, 'globs': globs,
+        'scalar32': {'float'} | {k for k, v in types.items() if v is FLOAT32},
+        'scalar64': ({'double', 'long double'}
+                     | {k for k, v in types.items() if v is FLOAT64}),
+    }
+
+    # Пути включения: все каталоги, где есть заголовки. Без этого стенд не
+    # собирается почти ни для одного файла настоящего проекта.
+    inc_dirs = sorted({p.parent for p in pool if p.suffix == '.h'})
+    inc_args = []
+    for d in inc_dirs:
+        inc_args += ['-I', str(d)]
+
+    print('цель:', given)
+    print('судья:', CLANG, '| сравнение побитовое')
+    print('диапазон входов: [{:g}, {:g}], случаев на функцию: {}'.format(lo, hi, a.cases))
+    print('файлов к обходу:', len(targets))
+    print()
+
+    tmp = Path(tempfile.mkdtemp(prefix='difftest_'))
+    checked = skipped = 0
+    bad = []
+    for target in targets:
+        c, sk, b = run_file(target, ctx, a, lo, hi, tmp, inc_args=inc_args,
+                            label='' if not whole_repo else '')
+        if (c or b) and whole_repo and not a.quiet:
+            print('-- {} : сверено {}, пропущено {}, расхождений {}'.format(
+                target.relative_to(root), c, sk, len(b)))
+        checked += c
+        skipped += sk
+        bad += b
 
     print()
     print('сверено функций: {} | пропущено: {} | расхождений: {}'.format(
         checked, skipped, len(bad)))
+    if ctx.get('why'):
+        print('почему пропущены:')
+        for reason, n in sorted(ctx['why'].items(), key=lambda kv: -kv[1]):
+            print('  {:<42} {}'.format(reason, n))
     for name, vals, ours, theirs in bad:
         print('  {}: наш разбор {} против компилятора {}'.format(name, ours, theirs))
         print('    входы:', vals)
