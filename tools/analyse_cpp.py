@@ -25,6 +25,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from pareto import budget as _budget
 from pareto.api import analyse_expression, domain_hazards
+from pareto.program import ProgramError, analyse_program
 from pareto.codegen import to_c
 from pareto.llfront import (LLError, compile_to_ll, demangle, functions_of)
 
@@ -78,13 +79,53 @@ def main():
         human = demangle(name, Path(CLANG).parent)
         if a.function and a.function not in human and a.function not in name:
             continue
-        if kind != 'дерево':
+        if kind == 'отказ':
             refused += 1
             if a.why:
                 print('отказ  {}'.format(human[:70]))
                 print('       {}'.format(payload))
             continue
         read += 1
+        if kind == 'программа':
+            # Функция с ветвлениями: у каждого пути своя арифметика, своя
+            # область достижимости и своя лучшая запись. Разбирается по путям.
+            names = ['a' + r if r.isdigit() else r for r, _f in args]
+            dom = {n: (lo, hi) for n in names}
+            print('=== {}'.format(human[:90]))
+            _budget.set_budget(a.budget)
+            try:
+                res = analyse_program(payload, dom)
+            except (ProgramError, Exception) as e:
+                print('   разбор по путям не удался: {}'.format(e))
+                _budget.clear()
+                print()
+                continue
+            finally:
+                _budget.clear()
+            print('путей исполнения: {}'.format(len(res.get('paths', []))))
+            base = res.get('base_bound')
+            best = res.get('best_bound')
+            print('граница как есть : {}'.format(
+                '{:.3e}'.format(base) if base is not None
+                and math.isfinite(base) else 'не доказана'))
+            if best is not None and math.isfinite(best):
+                print('лучшая найденная: {:.3e}'.format(best))
+                if base is not None and math.isfinite(base) and best > 0:
+                    print('                  туже в {:.0f} раз'.format(base / best))
+            extra = res.get('divergence_extra') or 0.0
+            if extra > 0:
+                # Отдельная строка нарочно: у ветвления есть своя беда, не
+                # связанная с округлением. Условие решается по ВЫЧИСЛЕННЫМ
+                # величинам, поэтому у границы условия программа может уйти в
+                # другую ветку, и ошибка включает весь скачок между ветками.
+                print('из них прыжок между ветками: {:.3e} — условие решается '
+                      'по вычисленным величинам, и у самой границы условия '
+                      'выбирается другая ветка'.format(extra))
+            for pth in res.get('paths', [])[:6]:
+                cond = ' и '.join(pth.get('guards_text') or []) or '(всегда)'
+                print('   путь {}: {}'.format(pth.get('label', '?'), cond[:70]))
+            print()
+            continue
         tree = payload
         names = ['a' + r if r.isdigit() else r for r, _f in args]
         dom = {n: (lo, hi) for n in names}

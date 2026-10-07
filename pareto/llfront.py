@@ -79,6 +79,69 @@ _ARG = re.compile(r'(float|double)\b[^,]*?%(?P<reg>[\w.]+)')
 _HEX = re.compile(r'^0x([0-9A-Fa-f]+)$')
 
 
+# Предикаты сравнения. Берём только УПОРЯДОЧЕННЫЕ: `olt` истинно, когда оба
+# операнда — числа и первый меньше. Неупорядоченные (`ult` и прочие) истинны
+# также когда один из операндов NaN, и приравнивать их к обычному сравнению
+# значило бы читать другую программу. Такие отвергаем.
+FCMP = {'olt': '<', 'ole': '<=', 'ogt': '>', 'oge': '>=', 'oeq': '==',
+        'one': '!='}
+
+
+def _same(a, b):
+    """Совпадают ли деревья с точностью до округления.
+
+    Округление здесь не значимо: `f32(x)` и `x` для сравнения образцов min/max
+    — одно и то же значение, просто в одном случае компилятор сохранил узел.
+    """
+    def strip(t):
+        while isinstance(t, tuple) and t and t[0] in ('f32', 'f16', 'approx',
+                                                      'eft'):
+            t = t[1]
+        return t
+    return strip(a) == strip(b)
+
+
+def _is_zero(t):
+    while isinstance(t, tuple) and t and t[0] in ('f32', 'f16'):
+        t = t[1]
+    return isinstance(t, tuple) and t[0] == 'num' and float(t[1]) == 0.0
+
+
+def _negates(t, base):
+    while isinstance(t, tuple) and t and t[0] in ('f32', 'f16'):
+        t = t[1]
+    if isinstance(t, tuple) and t[0] == 'neg' and _same(t[1], base):
+        return True
+    return (isinstance(t, tuple) and t[0] == '-' and _is_zero(t[1])
+            and _same(t[2], base))
+
+
+def recognise_select(cond, a, b):
+    """Узнать в выборе обычную операцию: минимум, максимум или модуль.
+
+    Это не украшение. Выбор без узнавания превращается в ДВА пути исполнения, и
+    на вложенных выборах их число растёт вдвое на каждом: обычное ограничение
+    снизу и сверху даёт четыре пути вместо одной операции. А `fmin`, `fmax` и
+    `fabs` у нас уже есть, и ошибки они не вносят вовсе.
+    """
+    op, left, right = cond
+    if op in ('<', '<='):
+        if _same(a, left) and _same(b, right):
+            return ('fmin', left, right)
+        if _same(a, right) and _same(b, left):
+            return ('fmax', left, right)
+        if _is_zero(right) and _negates(a, left) and _same(b, left):
+            return ('fabs', left)
+    if op in ('>', '>='):
+        if _same(a, left) and _same(b, right):
+            return ('fmax', left, right)
+        if _same(a, right) and _same(b, left):
+            return ('fmin', left, right)
+        if _is_zero(right) and _same(a, left) and _negates(b, left):
+            return ('fabs', left)
+    return None
+
+
 class LLError(ValueError):
     """Функция не читается этим способом. Причина — в сообщении."""
 
@@ -139,13 +202,35 @@ def parse_module(text):
 
 
 def build(args, body):
-    """Дерево выражения возврата по телу функции. Иначе LLError.
+    """Дерево выражения возврата. Только прямолинейная функция, иначе LLError."""
+    stmts, result = _walk(args, body)
+    if stmts:
+        raise LLError('в теле есть выбор по условию: это программа с путями, '
+                      'читайте её через build_program')
+    return result
 
-    Поддерживаются прямолинейные функции: ровно один блок и один `ret`. Память,
-    ветвления и phi отвергаются — там значение зависит от того, чего мы не
-    моделируем.
+
+def build_program(args, body):
+    """Программа функции операторами, как в pareto/program.py.
+
+    Отличие от build одно: выбор по условию становится ветвлением, а не отказом.
+    Прямолинейная функция даёт список из одного возврата, то есть частный
+    случай, а не отдельная ветка кода.
+    """
+    stmts, result = _walk(args, body)
+    return list(stmts) + [('return', result)]
+
+
+def _walk(args, body):
+    """Общий обход тела: возвращает (операторы, дерево возврата).
+
+    Память, циклы и phi отвергаются — там значение зависит от того, чего мы не
+    моделируем, и притворяться, что моделируем, значило бы считать границу для
+    другой программы.
     """
     env = {}
+    conds = {}
+    stmts = []
     for reg, fmt in args:
         env[reg] = (('var', 'a' + reg if reg.isdigit() else reg), fmt)
     result = None
@@ -214,13 +299,49 @@ def build(args, body):
         if op == 'call':
             env[dst] = _call(rest, env)
             continue
+        if op == 'fcmp':
+            mm = re.match(r'fcmp\s+(?:fast\s+|nnan\s+|ninf\s+)*(\w+)\s+'
+                          r'(float|double)\s+(.+)$', rest)
+            if mm is None:
+                raise LLError('сравнение не разобрано: ' + rest[:60])
+            pred = mm.group(1)
+            if pred not in FCMP:
+                raise LLError('предикат {!r} неупорядоченный или неизвестный: '
+                              'приравнивать его к обычному сравнению значило бы '
+                              'читать другую программу'.format(pred))
+            fmt_c = TYPES[mm.group(2)]
+            l_s, r_s = [t.strip() for t in mm.group(3).split(',')[:2]]
+            conds[dst] = (FCMP[pred],
+                          _value(l_s, env, fmt_c)[0],
+                          _value(r_s, env, fmt_c)[0])
+            continue
         if op == 'select':
-            raise LLError('select: выбор по условию пока не читается')
+            mm = re.match(r'select\s+i1\s+(\S+?),\s*(float|double)\s+(\S+?),'
+                          r'\s*(float|double)\s+(\S+)$', rest)
+            if mm is None:
+                raise LLError('выбор не разобран: ' + rest[:60])
+            ckey = mm.group(1).lstrip('%')
+            if ckey not in conds:
+                raise LLError('условие выбора получено не сравнением')
+            fmt_s = TYPES[mm.group(2)]
+            a_v = _value(mm.group(3), env, fmt_s)[0]
+            b_v = _value(mm.group(5), env, fmt_s)[0]
+            got = recognise_select(conds[ckey], a_v, b_v)
+            if got is not None:
+                env[dst] = (got, fmt_s)
+                continue
+            # Обычный выбор: это два пути исполнения. Имя результата одно на обе
+            # ветви, иначе дальше по тексту сослались бы на имя из одной из них.
+            inner = 'sel' + dst
+            stmts.append(('if', conds[ckey],
+                          [('let', inner, a_v)], [('let', inner, b_v)]))
+            env[dst] = (('var', inner), fmt_s)
+            continue
         raise LLError('операция {!r} не поддержана'.format(op))
 
     if result is None:
         raise LLError('в теле нет возврата значения')
-    return result
+    return stmts, result
 
 
 def _round(node, fmt):
@@ -319,14 +440,21 @@ def demangle(name, clang_dir=None):
 
 
 def functions_of(path):
-    """Читаемые функции представления: имя -> (аргументы, дерево) либо причина."""
+    """Читаемые функции представления: имя -> (вид, содержимое, аргументы).
+
+    Вид «дерево» — прямолинейная функция. Вид «программа» — с ветвлениями, её
+    разбирает pareto/program.py по путям. Вид «отказ» несёт причину словами.
+    """
     text = Path(path).read_text(encoding='utf-8', errors='replace')
     out = {}
     for name, (args, body) in parse_module(text).items():
         try:
-            tree = build(args, body)
+            stmts = build_program(args, body)
         except LLError as e:
             out[name] = ('отказ', str(e), args)
             continue
-        out[name] = ('дерево', tree, args)
+        if len(stmts) == 1:
+            out[name] = ('дерево', stmts[0][1], args)
+        else:
+            out[name] = ('программа', stmts, args)
     return out
