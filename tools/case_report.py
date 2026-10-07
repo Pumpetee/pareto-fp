@@ -19,6 +19,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from arith_coverage import INT_TYPES, is_float_candidate   # noqa: E402
+
+from pareto import budget as _budget
 from pareto.api import analyse_c_function, domain_hazards
 from pareto.cfront import (CParseError, collect_context, constants, functions,
                            globals_of, macro_aliases, make_resolver,
@@ -80,6 +85,13 @@ def main():
     ap = argparse.ArgumentParser()
     ap.add_argument('repo')
     ap.add_argument('--range', default='-1e3..1e3')
+    ap.add_argument('--budget', type=float, default=5.0, metavar='СЕКУНД',
+                    help='предел времени на одну функцию; 0 — без предела. '
+                         'Обход проекта должен занимать предсказуемое время: на '
+                         'raylib четыре функции из трёхсот съедали 157 секунд из '
+                         'трёхсот, и человек, запустивший инструмент на своём '
+                         'коде, видел только висящий терминал. Обрезанные этапы '
+                         'называются в выводе, а не скрываются.')
     ap.add_argument('--top', type=int, default=12,
                     help='сколько самых крупных улучшений показать')
     a = ap.parse_args()
@@ -103,10 +115,13 @@ def main():
                             globs=globs)
     ctx = {'types': types, 'table': table, 'resolve': resolve, 'macros': macros,
            'consts': consts, 'globs': globs}
+    float_types = set(types) | {'float', 'double'}
+    type_names = set(types) | set(table) | INT_TYPES | {'float', 'double'}
 
-    seen = accepted = trivial = 0
+    seen = accepted = trivial = candidates = taken = 0
     proved = unproved = 0
     rows, hazards, refusals = [], [], {}
+    cut_any = set()
 
     for f in files:
         try:
@@ -118,6 +133,12 @@ def main():
             continue
         for name in names:
             seen += 1
+            # Та же мера кандидата, что в arith_coverage: два документа про один
+            # проект обязаны называть одно число. Разные знаменатели в разговоре
+            # о покупке читаются как путаница в своих же данных.
+            is_cand, _ = is_float_candidate(src, name, float_types, type_names)
+            if is_cand:
+                candidates += 1
             flds = struct_result_fields(src, name, types, table) or [None]
             try:
                 prog = None
@@ -132,15 +153,21 @@ def main():
                 refusals[type(e).__name__] = refusals.get(type(e).__name__, 0) + 1
                 continue
             accepted += 1
+            if is_cand:
+                taken += 1
             if not counts_arithmetic(prog):
                 trivial += 1
                 continue
             dom = {arg: (lo, hi) for arg in prog['args']}
+            _budget.set_budget(a.budget)
             try:
                 res = analyse_c_function(src, name, dom=dom, ctx=ctx,
                                          field=flds[0])
             except Exception:
                 continue
+            finally:
+                cut_any.update(_budget.cut_stages())
+                _budget.clear()
             base, best = res.get('base_bound'), res.get('best_bound')
             if base is None or not math.isfinite(base):
                 unproved += 1
@@ -189,8 +216,23 @@ def main():
           'функция вида `return body->m` проходит фронтенд, но доказывать в ней '
           'нечего.')
     print()
+    print('Главное число — доля от КАНДИДАТОВ, то есть от функций, где по тексту '
+          'исходника есть вещественная арифметика. Остальные в знаменатель '
+          'ставить нельзя: в `void`-процедуре или целочисленном счётчике '
+          'доказывать нечего, и держать их там значило бы назначить себе цель, '
+          'которой достичь невозможно.')
+    print()
+    print('**Принято из кандидатов: {} из {}'.format(taken, candidates)
+          + (' — {:.1f}%**'.format(100.0 * taken / candidates) if candidates
+             else '**'))
+    print()
     print('## Границы')
     print()
+    if cut_any:
+        print('Предел времени на функцию: {:g} с. Из-за него на части функций '
+              'поиск оборван, и граница ниже могла быть туже: {}. Снимается '
+              'ключом `--budget 0`.'.format(a.budget, ', '.join(sorted(cut_any))))
+        print()
     print('Граница доказана: **{}**, не доказана: **{}**.'.format(proved, unproved))
     print()
     if rows:
