@@ -145,8 +145,17 @@ def _is_diagnostic(name):
 
 
 class _Parser:
-    def __init__(self, toks, resolve=None, macros=None, consts=None, globs=None):
+    def __init__(self, toks, resolve=None, macros=None, consts=None,
+                 globs=None, float_types=None):
         self.t, self.i = toks, 0
+        # Вещественные типы ПРОЕКТА, а не только три имени из стандарта. Chipmunk
+        # весь написан на cpFloat, и девять его функций отвергались на строке
+        # `cpFloat width = box.r - box.l;` — то есть на обычном объявлении
+        # локальной переменной. Псевдонимы типов собирались, но до разборщика не
+        # доходили: он знал только float, double и long double.
+        self.float_types = dict(FLOAT_TYPES)
+        if float_types:
+            self.float_types.update(float_types)
         self.vars = {}          # имя в C -> (имя в дереве, формат)
         self.counter = 0
         # Чем разрешать вызовы соседних функций. Без этого настоящий код читается
@@ -229,9 +238,10 @@ class _Parser:
         if tok.text == '(':
             # приведение типа или просто скобки
             nxt = self.peek(1)
-            if nxt.kind == 'name' and nxt.text in FLOAT_TYPES and self.peek(2).text == ')':
+            if (nxt.kind == 'name' and nxt.text in self.float_types
+                    and self.peek(2).text == ')'):
                 self.take('(')
-                fmt = FLOAT_TYPES[self.take().text]
+                fmt = self.float_types[self.take().text]
                 self.take(')')
                 inner = self.unary()
                 if fmt is inner.fmt:
@@ -419,14 +429,18 @@ class _Parser:
                 raise CParseError(
                     'the called function {} is not a single return expression, so it cannot '
                     'be substituted here'.format(cal['name']), tok.line)
-            tree, fmt = picked
-            # Формат берём из ОБЪЯВЛЕННОГО типа возврата вызванной функции, а не
-            # по догадке. Поставить здесь FLOAT64 по умолчанию значило бы, что
-            # вызов float-функции внутри выражения считается у нас в двойной
-            # точности, а в C в одинарной: то есть мы разбираем не ту программу,
-            # что написана. Само выражение уже несёт нужные округления — их
-            # навесил _finish_returns при разборе вызванной функции.
-            stmts = [('return', Typed(tree, cal.get('result') or fmt or FLOAT64))]
+            tree, _fmt = picked
+            # Кладём ОБЫЧНОЕ дерево, а не Typed: ниже по этой же функции идёт
+            # подстановка аргументов обходом узлов, и обёртка ломала её с
+            # TypeError. Я написал здесь Typed в цикле 50 из заботы о формате —
+            # и тем самым сломал ровно то, что включал: подстановка cpfmin и
+            # cpfmax падала вместо работы, причём молча для тестов, потому что ни
+            # один из них не подставлял функцию с выбором внутрь выражения.
+            #
+            # Формат и не требовался: возврат этой функции оборачивается в Typed
+            # с cal['result'] на выходе, то есть тип берётся из объявления
+            # вызванной функции, как и надо.
+            stmts = [('return', tree)]
 
         sub = {}
         for (base, fields), (kind, val) in zip(groups, raw):
@@ -602,7 +616,7 @@ class _Parser:
         if tok.text == ';':
             self.take(';')
             return []
-        if tok.kind == 'name' and tok.text in FLOAT_TYPES:
+        if tok.kind == 'name' and tok.text in self.float_types:
             return self.declaration()
         if tok.kind == 'name' and tok.text in ('int', 'long', 'short', 'unsigned', 'char',
                                                'signed', 'const', 'static', 'register'):
@@ -666,7 +680,7 @@ class _Parser:
                           tok.line)
 
     def declaration(self):
-        fmt = FLOAT_TYPES[self.take().text]
+        fmt = self.float_types[self.take().text]
         out = []
         while True:
             name_tok = self.take()
@@ -1471,7 +1485,8 @@ def parse_function(src, name=None, types=None, table=None, resolve=None,
 
     body = _body_text(src, chosen.end() - 1)
     toks = tokenize(body)
-    p = _Parser(toks, resolve=resolve, macros=macros, consts=consts, globs=globs)
+    p = _Parser(toks, resolve=resolve, macros=macros, consts=consts,
+                globs=globs, float_types=types)
     p.structs = table
     p.opaque = opaque
     for a in order:
