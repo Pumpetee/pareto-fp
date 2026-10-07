@@ -115,6 +115,14 @@ python pareto-fp.pyz --file kernel.c --function energy --domain v=1..2 --require
 
 Exit code 0: your requirement holds as the code is written. 1: it does not hold as written, but the rewritten form the tool prints does hold. 2: no form found holds it. That is what makes it usable inside a build and not only in a terminal.
 
+**Your whole project at once**, which is how you would actually use it:
+
+```
+python tools/check_project.py src/ --require 1e-6 --range=-1e3..1e3
+```
+
+It walks every function, groups them into "holds as written", "holds after the rewrite we print", and "not reachable in any form", and returns the same exit codes. Functions it could not read are counted and printed separately — they are never quietly counted as green.
+
 The ranges are not optional. Without knowing what the inputs are, there is no error to bound — for us or for anyone.
 
 More: [how it works](docs/how-it-works.md) · [run on real libraries](docs/real-projects.md) · [side by side with other tools](docs/comparison.md) · [reproducible defects](docs/witnesses.md)

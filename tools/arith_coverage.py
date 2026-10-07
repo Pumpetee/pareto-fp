@@ -254,6 +254,20 @@ def main():
     files = [p for p in root.rglob('*')
              if p.suffix in ('.c', '.h')
              and not any(part.lower() in skip for part in p.parts)]
+    # Сколько файлов выброшено по ИМЕНИ каталога — обязательно вслух. Каталог с
+    # именем test или demo исключается как чужой вспомогательный код, но если
+    # чей-то проект целиком лежит в папке с таким именем, он получит пустой
+    # отчёт. Молчаливый ноль читается как «всё чисто», а это худший вид ответа.
+    _all = [p for p in root.rglob('*') if p.suffix in ('.c', '.h')]
+    _skipped = len(_all) - len(files)
+    if _skipped:
+        print('пропущено файлов по имени каталога ({}): {} из {}'.format(
+            ', '.join(sorted(skip))[:60] + '...', _skipped, len(_all)))
+        if not files:
+            print('ПРОВЕРЯТЬ НЕЧЕГО: все файлы отброшены по имени каталога. '
+                  'Если ваш код лежит в папке с таким именем, укажите на '
+                  'подкаталог с исходниками напрямую.')
+
     types, table = collect_context(files)
     texts = []
     for f in files:

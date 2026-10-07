@@ -74,6 +74,20 @@ def main():
     files = [p for p in root.rglob('*')
              if p.suffix in ('.c', '.h')
              and not any(part.lower() in SKIP_DIRS for part in p.parts)]
+    # Сколько файлов выброшено по ИМЕНИ каталога — обязательно вслух. Каталог с
+    # именем test или demo исключается как чужой вспомогательный код, но если
+    # чей-то проект целиком лежит в папке с таким именем, он получит пустой
+    # отчёт. Молчаливый ноль читается как «всё чисто», а это худший вид ответа.
+    _all = [p for p in root.rglob('*') if p.suffix in ('.c', '.h')]
+    _skipped = len(_all) - len(files)
+    if _skipped:
+        print('пропущено файлов по имени каталога ({}): {} из {}'.format(
+            ', '.join(sorted(SKIP_DIRS))[:60] + '...', _skipped, len(_all)))
+        if not files:
+            print('ПРОВЕРЯТЬ НЕЧЕГО: все файлы отброшены по имени каталога. '
+                  'Если ваш код лежит в папке с таким именем, укажите на '
+                  'подкаталог с исходниками напрямую.')
+
     types, table = collect_context(files)
     texts = []
     for f in files:
@@ -117,15 +131,34 @@ def main():
                     unreadable += 1
                     break
                 dom = {arg: per_arg.get(arg, (lo, hi)) for arg in prog['args']}
+                # Сначала ДЕШЁВАЯ проверка: граница для кода как он написан, без
+                # поиска переписи. Если требование уже держится, искать лучшую
+                # форму не нужно вовсе — а именно поиск и стоит почти всё время.
+                # Пока этого не было, мягкая проверка raylib не укладывалась и в
+                # десять минут, хотя ответ на неё «всё держится».
                 _budget.set_budget(a.budget)
                 try:
                     res = analyse_c_function(src, name, dom=dom, ctx=ctx,
-                                             field=fld)
+                                             field=fld, optimise=False)
                 except Exception:
                     unreadable += 1
+                    _budget.clear()
                     continue
                 finally:
                     _budget.clear()
+                base_quick = res.get('base_bound')
+                if not (base_quick is not None and math.isfinite(base_quick)
+                        and base_quick <= a.require):
+                    # Не прошло как написано — вот теперь ищем форму.
+                    _budget.set_budget(a.budget)
+                    try:
+                        res = analyse_c_function(src, name, dom=dom, ctx=ctx,
+                                                 field=fld)
+                    except Exception:
+                        unreadable += 1
+                        continue
+                    finally:
+                        _budget.clear()
                 checked += 1
                 base = res.get('base_bound')
                 best = res.get('best_bound')
