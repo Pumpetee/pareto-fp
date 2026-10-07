@@ -314,9 +314,24 @@ class _Parser:
                 return self.call()
             self.take()
             key = tok.text
+            # Индекс массива принимается ТОЛЬКО постоянный: v[0], m[1][2]. При
+            # вычисляемом индексе читаемый элемент зависит от исполнения, и
+            # величина за ним неизвестна — такое остаётся отказом.
+            while self.at('[') and self.peek(1).kind == 'num' and \
+                    self.peek(2).text == ']':
+                self.take('[')
+                idx = self.take().text
+                self.take(']')
+                key = '{}[{}]'.format(key, int(float(idx)))
             while self.peek().text in ('.', '->') and self.peek(1).kind == 'name':
                 sep = self.take().text
                 key = key + sep + self.take().text
+                while self.at('[') and self.peek(1).kind == 'num' and \
+                        self.peek(2).text == ']':
+                    self.take('[')
+                    idx = self.take().text
+                    self.take(']')
+                    key = '{}[{}]'.format(key, int(float(idx)))
             if key not in self.vars and key in self.consts:
                 fmt = getattr(self.consts, 'fmts', {}).get(key, FLOAT64)
                 return Typed(('num', float(self.consts[key])), fmt)
@@ -494,6 +509,12 @@ class _Parser:
             for sep in ('.', '->'):
                 if sep in k:
                     out.add(k.rsplit(sep, 1)[0])
+            # Массив передаётся в вызов так же — одним именем: glm_vec3_dot(v, v).
+            # Для подстановки это тот же набор скаляров, что и у структуры, и
+            # отличать их здесь не за что. Пока отличали, цепочка вызовов в cglm
+            # рвалась сообщением «ожидается структура для a».
+            if '[' in k:
+                out.add(k.split('[', 1)[0])
         return out
 
     def user_arg(self):
@@ -519,12 +540,14 @@ class _Parser:
         """Подставить тело вызванной функции вместо вызова."""
         groups, seen = [], set()
         for a in cal['order']:
-            base = a.split('.', 1)[0] if '.' in a else a
+            base, _suf = split_slot(a)
             if base in seen:
                 continue
             seen.add(base)
-            fields = [x.split('.', 1)[1] for x in cal['order']
-                      if x.startswith(base + '.')]
+            # Суффиксы с разделителем: '.x' у поля структуры, '[0]' у элемента
+            # массива. Общий вид нужен, чтобы подстановка работала для обоих.
+            fields = [split_slot(x)[1] for x in cal['order']
+                      if split_slot(x)[0] == base and split_slot(x)[1]]
             groups.append((base, fields or None))
         if len(groups) != len(raw):
             raise CParseError('call to {} with {} argument(s) does not match its {} '
@@ -566,16 +589,23 @@ class _Parser:
                 if kind != 'struct':
                     raise CParseError('{} expects a struct for {!r}; pass the variable by '
                                       'name'.format(cal['name'], base), tok.line)
-                for f in fields:
-                    key = None
-                    for sep in ('.', '->'):
-                        if val + sep + f in self.vars:
-                            key = val + sep + f
-                            break
+                for suf in fields:
+                    # Суффикс уже несёт разделитель: '.x' для поля структуры,
+                    # '[0]' для элемента массива. Так одна механика работает для
+                    # обоих — до 07.10.2026 здесь резало только по точке, и вызов
+                    # glm_vec3_dot(v, v) отвергался сообщением «два аргумента
+                    # против шести параметров»: шесть элементов массива считались
+                    # шестью отдельными параметрами.
+                    probes = [val + suf]
+                    if suf.startswith('.'):
+                        probes.append(val + '->' + suf[1:])
+                    elif suf.startswith('->'):
+                        probes.append(val + '.' + suf[2:])
+                    key = next((k for k in probes if k in self.vars), None)
                     if key is None:
-                        raise CParseError('{!r} has no field {!r} here'.format(val, f),
+                        raise CParseError('{!r} has no member {!r} here'.format(val, suf),
                                           tok.line)
-                    sub[base + '.' + f] = ('var', self.vars[key][0])
+                    sub[base + suf] = ('var', self.vars[key][0])
 
         def walk(node):
             if node[0] == 'var':
@@ -1462,6 +1492,22 @@ def _subst_cond(cond, env):
     return (cond[0], substitute(cond[1], env), substitute(cond[2], env))
 
 
+def split_slot(flat):
+    """Основа и суффикс плоского имени: `v.x` -> (v, '.x'), `a[0]` -> (a, '[0]').
+
+    Суффикс хранится ВМЕСТЕ с разделителем нарочно: так одна механика подстановки
+    работает и для полей структуры, и для элементов массива. Пока резало только
+    по точке, вызов glm_vec3_dot(v, v) отвергался сообщением «два аргумента
+    против шести параметров» — шесть элементов массива считались шестью
+    отдельными параметрами.
+    """
+    cuts = [i for i in (flat.find('.'), flat.find('->'), flat.find('[')) if i >= 0]
+    if not cuts:
+        return flat, ''
+    i = min(cuts)
+    return flat[:i], flat[i:]
+
+
 def flatten_program(stmts):
     """Прямолинейная программа как ОДНО выражение. None, если есть ветвление.
 
@@ -1645,6 +1691,11 @@ def struct_result_fields(src, name, types=None, table=None):
     for _tn, _flds in (table or {}).items():
         merged[_tn] = _flds
     merged.conflicts.update(getattr(table, 'conflicts', {}) or {})
+    # Массивные типы тоже переносим: иначе параметр `vec3 v` снова становится
+    # неизвестным, и ошибка выглядит как «неизвестное имя a[0]» — то есть как
+    # будто мы не умеем читать индекс, хотя не умеем мы совсем другое.
+    merged.arrays.update(getattr(table, 'arrays', {}) or {})
+    merged.arrays.update(array_types(src, types, merged.arrays))
     local = structs(src, types)
     for _tn, _flds in local.items():
         _record_struct(merged, _tn, _flds, keep_first=True)
@@ -1899,12 +1950,17 @@ def collect_context(paths):
     # файлами: одно и то же имя под условной сборкой встречается в одном
     # заголовке, а зависящая от него функция — в другом. Терялся список здесь, и
     # отказ по спорному типу не срабатывал, хотя сам спор уже находился.
+    arrays = {}
+    for _ in range(2):
+        for src in texts:
+            arrays = array_types(src, types, arrays)
     table = StructTable()
     for src in texts:
         part = structs(src, types)
         for name, fields in part.items():
             _record_struct(table, name, fields, keep_first=True)
         table.conflicts.update(getattr(part, 'conflicts', {}) or {})
+    table.arrays = arrays
     return types, table
 
 
@@ -1988,11 +2044,60 @@ class StructTable(dict):
     сборки и может сказать его нам.
     """
 
-    __slots__ = ('conflicts',)
+    __slots__ = ('conflicts', 'arrays')
 
     def __init__(self, *a, **kw):
         super().__init__(*a, **kw)
         self.conflicts = {}
+        self.arrays = {}
+
+
+_TYPEDEF_ARRAY = re.compile(
+    r"typedef\s+([A-Za-z_][\w\s]*?)\s+([A-Za-z_]\w*)\s*\[\s*(\d+)\s*\]\s*;")
+
+
+def array_types(src, types=None, base=None):
+    """Псевдонимы массивов постоянной длины: `typedef float vec3[3];`.
+
+    Без них целый класс настоящего кода для нас невидим. Математические
+    библиотеки для робототехники и графики сплошь представляют вектор массивом,
+    а не структурой: в cglm `vec3` это `float[3]`, и скалярное произведение
+    записано как `a[0]*b[0] + a[1]*b[1] + a[2]*b[2]`.
+
+    Для доказательства границы разницы между `v.x` и `v[0]` нет никакой: длина
+    известна из объявления, индексы постоянны, значит это ровно три независимых
+    скалярных входа. Непостоянный индекс — другое дело, он остаётся отказом:
+    какой элемент прочитан, зависит от исполнения, и величина за ним неизвестна.
+
+    Цепочки учитываются: `typedef vec3 mat3[3]` даёт матрицу из девяти чисел.
+    """
+    out = dict(base or {})
+    types = types or FLOAT_TYPES
+    for _ in range(3):
+        for m in _TYPEDEF_ARRAY.finditer(src):
+            elem = " ".join(m.group(1).split())
+            name, length = m.group(2), int(m.group(3))
+            if name in out:
+                continue
+            if elem in types:
+                out[name] = (types[elem], (length,))
+            elif elem in out:
+                inner_fmt, inner_shape = out[elem]
+                out[name] = (inner_fmt, (length,) + inner_shape)
+    return out
+
+
+def array_slots(name, fmt, shape):
+    """Плоские имена элементов: v[0], v[1] или m[0][1] — с форматом каждого."""
+    out = []
+    if len(shape) == 1:
+        for i in range(shape[0]):
+            out.append(('{}[{}]'.format(name, i), fmt))
+        return out
+    for i in range(shape[0]):
+        for sub, f in array_slots('{}[{}]'.format(name, i), fmt, shape[1:]):
+            out.append((sub, f))
+    return out
 
 
 def structs(src, types=None):
@@ -2136,6 +2241,11 @@ def parse_function(src, name=None, types=None, table=None, resolve=None,
     for _tn, _flds in (table or {}).items():
         merged[_tn] = _flds
     merged.conflicts.update(getattr(table, 'conflicts', {}) or {})
+    # Массивные типы тоже переносим: иначе параметр `vec3 v` снова становится
+    # неизвестным, и ошибка выглядит как «неизвестное имя a[0]» — то есть как
+    # будто мы не умеем читать индекс, хотя не умеем мы совсем другое.
+    merged.arrays.update(getattr(table, 'arrays', {}) or {})
+    merged.arrays.update(array_types(src, types, merged.arrays))
     local = structs(src, types)
     for _tn, _flds in local.items():
         _record_struct(merged, _tn, _flds, keep_first=True)
@@ -2209,9 +2319,40 @@ def parse_function(src, name=None, types=None, table=None, resolve=None,
             # отваливается только из-за лишнего слова в сигнатуре.
             bits = [w for w in part.replace('*', ' * ').split()
                     if w not in ('const', 'volatile', 'register')]
+            # Массив ПОСТОЯННОЙ длины — это набор скаляров, и ничего больше.
+            # Либо через псевдоним (`vec3 v`, где vec3 это float[3]), либо прямо
+            # в подписи (`float v[3]`). Длина известна, значит известны и имена
+            # элементов: v[0], v[1], v[2]. Для доказательства границы разницы с
+            # полями структуры нет никакой.
+            #
+            # Это открывает целый класс настоящего кода: математика для
+            # робототехники и графики сплошь держит вектор массивом, а не
+            # структурой. В cglm скалярное произведение написано как
+            # a[0]*b[0] + a[1]*b[1] + a[2]*b[2], и до 07.10.2026 мы отвергали
+            # такое целиком — принято было 6.9% против 49% на raylib.
+            arr_types = getattr(table, 'arrays', {}) or {}
+            arr_hit = None
+            if bits and bits[0] in arr_types and len(bits) == 2:
+                arr_hit = (bits[1], ) + arr_types[bits[0]]
+            elif '[' in part:
+                m_arr = re.match(
+                    r'\s*([A-Za-z_]\w*)\s+([A-Za-z_]\w*)\s*((?:\[\s*\d+\s*\])+)\s*$',
+                    part.replace('const', ' ').replace('volatile', ' '))
+                if m_arr and m_arr.group(1) in types:
+                    dims = tuple(int(x) for x in re.findall(r'\d+', m_arr.group(3)))
+                    arr_hit = (m_arr.group(2), types[m_arr.group(1)], dims)
+            if arr_hit is not None:
+                vname, fmt_a, shape = arr_hit
+                for key, fmt_e in array_slots(vname, fmt_a, shape):
+                    args[key] = fmt_e
+                    order.append(key)
+                continue
             if '[' in part or ']' in part:
-                raise CParseError('function {} takes an array. A reduction over an array is '
-                                  'a separate mode'.format(fname), line0)
+                raise CParseError(
+                    'function {} takes an array whose length is not known here, or '
+                    'indexes it by a value computed at run time. Which element is '
+                    'read then depends on execution, and the value behind it is '
+                    'unknown'.format(fname), line0)
             if '*' in bits:
                 # Указатель на структуру — это чтение её полей, и для границы ошибки
                 # он ничем не отличается от структуры по значению: в дереве живут

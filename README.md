@@ -69,7 +69,11 @@ This is the part to hand to your engineers.
 
 **The tool is checked against a real compiler, bit for bit.** Every function is compiled by clang exactly as written, called on random inputs, and its answer is compared with our analysis — not approximately, but every single bit. If our reading of your code differed from your compiler's by one rounding, the comparison fails loudly.
 
-167 functions across the three libraries. **Zero disagreements.**
+**156 functions across the three libraries agree bit for bit. Zero disagreements.**
+
+Eleven more contain `sin`, `cos`, `exp` or `log`. For those the standard does *not* require the library to round exactly, so two correct platforms legitimately differ — and that difference gets amplified further down the expression. Demanding bit equality there would be demanding the impossible.
+
+Those eleven are checked against something stronger and more to the point: **the compiler's answer must fall inside the error bound we publish.** That is exactly the promise being sold — not "we compute what clang computes", but "the true answer is never further from ours than the printed bound". All eleven pass. We split the two cases rather than report one number, because the difference is real.
 
 That check does not run on the author's laptop. It runs on a clean machine in continuous integration: the three libraries are downloaded fresh and compared there, every time the code changes.
 

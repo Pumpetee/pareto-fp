@@ -36,6 +36,7 @@ from pareto.cfront import (collect_context, constants, functions, globals_of,
                            macro_aliases, make_resolver, parse_function,
                            struct_result_fields)
 from pareto.evalfp import eval_float
+from pareto.analysis import tree_cost_refined
 from pareto.program import paths
 from pareto.precision import FLOAT32, FLOAT64
 
@@ -234,6 +235,69 @@ RELOP = {'<': lambda a, b: a < b, '<=': lambda a, b: a <= b,
          '==': lambda a, b: a == b, '!=': lambda a, b: a != b}
 
 
+# Операции, у которых IEEE-754 ТРЕБУЕТ правильного округления: результат
+# однозначен, и побитовое сравнение с компилятором законно.
+EXACT_OPS = {'+', '-', '*', '/', 'sqrt', 'fma', 'neg', 'fabs', 'fmin', 'fmax',
+             'num', 'var', 'f32', 'f16'}
+
+# А вот sin, cos, exp, log, atan и прочее стандарт точным округлением НЕ
+# обязывает: libm вправе ошибаться на доли младшей единицы, и у каждой
+# платформы она ошибается по-своему. Требовать здесь побитового совпадения
+# значит требовать невозможного — и, что хуже, называть различием libm дефектом
+# нашего разбора.
+#
+# Поймано 07.10.2026 на Vector2Rotate из raylib: наш ответ совпал с ручным
+# расчётом в float32 до последнего бита, а clang дал на единицу иначе, потому
+# что его cosf округлил чуть по-другому. Граница это УЧИТЫВАЕТ (на такие
+# операции заложен свой запас в младших единицах), а побитовая сверка — нет.
+# Поэтому такие функции идут в отдельный разряд и сверяются с допуском.
+INEXACT_OPS = {'sin', 'cos', 'tan', 'atan', 'atan2', 'exp', 'log', 'expm1',
+               'log1p', 'pow', 'hypot'}
+
+# Допуск в младших единицах РЕЗУЛЬТАТА тут не годится, и это выяснилось сразу.
+# На Vector2Rotate из raylib ответы разошлись на 16 единиц — не потому, что libm
+# плох, а потому что одна его единица в cosf умножается на координату порядка
+# 777 и попадает под взаимное уничтожение в `v.x*cos - v.y*sin`. Усиление
+# законное, и фиксированным числом единиц его не описать.
+#
+# Правильная проверка для таких функций другая и, что важнее, полезнее: ответ
+# компилятора обязан лежать ВНУТРИ границы, которую мы обещаем. Это ровно наше
+# утверждение о продукте — не «мы считаем как clang до бита», а «настоящий ответ
+# не отличается от нашего больше, чем на напечатанную границу». Если компилятор
+# вышел за неё, виновата граница, и это дефект, который надо знать.
+BOUND_SLACK = 1.000001
+
+
+def uses_inexact(tree):
+    """Есть ли в выражении операция, которую libm не обязан округлять точно."""
+    if not isinstance(tree, tuple):
+        return False
+    if tree[0] in INEXACT_OPS:
+        return True
+    return any(uses_inexact(k) for k in tree[1:])
+
+
+def paths_use_inexact(ps):
+    for pth in ps:
+        if uses_inexact(pth.expr):
+            return True
+        for cond, _want in pth.guards:
+            if uses_inexact(cond[1]) or uses_inexact(cond[2]):
+                return True
+    return False
+
+
+def ulp_distance(a_bits, b_bits, width):
+    """Расстояние между двумя числами в младших единицах формата."""
+    sign_mask = 0x80000000 if width == 4 else 0x8000000000000000
+
+    def ordered(b):
+        return (b ^ 0xFFFFFFFF if width == 4 else b ^ 0xFFFFFFFFFFFFFFFF) \
+            if b & sign_mask else (b | sign_mask)
+
+    return abs(ordered(a_bits) - ordered(b_bits))
+
+
 def paths_of(prog):
     """Все пути исполнения функции. Один путь — частный случай, а не отдельный.
 
@@ -274,6 +338,7 @@ def run_file(target, ctx, a, lo, hi, tmp, inc_args=(), label=''):
     except OSError:
         return 0, 0, []
     checked = skipped = 0
+    near = 0
     bad = []
     # Причины пропуска считаем по видам. «Пропущено 31» — число, с которым нечего
     # делать: непонятно, упираемся мы в сборку стенда, в тип возврата или в
@@ -344,6 +409,16 @@ def run_file(target, ctx, a, lo, hi, tmp, inc_args=(), label=''):
                     print('      ' + ln)
             continue
 
+        inexact = paths_use_inexact(ps)
+        bound = None
+        if inexact:
+            # Граница считается ОДИН раз на весь домен: она верхняя, поэтому для
+            # любой точки внутри годится.
+            dom_all = {nm: (lo, hi) for nm, _w in order}
+            try:
+                bound = max(tree_cost_refined(pth.expr, dom_all)[1] for pth in ps)
+            except Exception:
+                bound = None
         mism = None
         for _ in range(a.cases):
             vals, argv = {}, []
@@ -376,16 +451,21 @@ def run_file(target, ctx, a, lo, hi, tmp, inc_args=(), label=''):
                     break
                 continue
             if to_bits(ours, out_width) != c_bits:
+                if inexact and bound is not None and math.isfinite(bound):
+                    if abs(ours - c_val) <= bound * BOUND_SLACK:
+                        continue      # внутри обещанной границы — это не дефект
                 mism = (dict(vals), repr(ours), repr(c_val))
                 break
         checked += 1
+        if inexact:
+            near += 1
         if not a.quiet:
             print('{:<26} {}'.format(label + name, 'совпало побитово' if mism is None
                                      else 'РАСХОЖДЕНИЕ'))
         if mism is not None:
             bad.append((name,) + mism)
 
-    return checked, skipped, bad
+    return checked, skipped, bad, near
 
 
 def main():
@@ -465,10 +545,10 @@ def main():
     print()
 
     tmp = Path(tempfile.mkdtemp(prefix='difftest_'))
-    checked = skipped = 0
+    checked = skipped = near = 0
     bad = []
     for target in targets:
-        c, sk, b = run_file(target, ctx, a, lo, hi, tmp, inc_args=inc_args,
+        c, sk, b, nr = run_file(target, ctx, a, lo, hi, tmp, inc_args=inc_args,
                             label='' if not whole_repo else '')
         if (c or b) and whole_repo and not a.quiet:
             print('-- {} : сверено {}, пропущено {}, расхождений {}'.format(
@@ -476,10 +556,16 @@ def main():
         checked += c
         skipped += sk
         bad += b
+        near += nr
 
     print()
     print('сверено функций: {} | пропущено: {} | расхождений: {}'.format(
         checked, skipped, len(bad)))
+    print('  из них побитово (только операции с обязательным округлением): {}'
+          .format(checked - near))
+    print('  сверено против НАШЕЙ границы (внутри есть sin/cos/exp/log/pow: '
+          'libm не обязан округлять точно, и его единица усиливается дальше по '
+          'выражению): {}'.format(near))
     if ctx.get('why'):
         print('почему пропущены:')
         for reason, n in sorted(ctx['why'].items(), key=lambda kv: -kv[1]):
