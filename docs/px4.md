@@ -19,6 +19,20 @@ git clone --depth 1 https://github.com/PX4/PX4-Matrix.git
 python tools/analyse_cpp.py your_file.cpp --range=-1e3..1e3 -I PX4-Matrix
 ```
 
+## Проверить всё тремя командами
+
+Внутри `docs/px4_check.cpp` нет ничего нашего: только PX4, стандартная libm и
+`printf`. Ответы печатаются рядом с правильными.
+
+```
+git clone --depth 1 https://github.com/PX4/PX4-Matrix.git
+git clone --depth 1 https://github.com/Pumpetee/pareto-fp.git
+clang++ -std=c++14 -O2 -I PX4-Matrix pareto-fp/docs/px4_check.cpp -o px4_check && ./px4_check
+```
+
+Последовательность проверена в чистом каталоге; `clang++` заменяется на `g++`
+без изменений.
+
 ## Три находки, все проверены запуском
 
 Не нашей моделью — скомпилированной программой на `-O2`.

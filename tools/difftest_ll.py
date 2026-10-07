@@ -34,10 +34,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from pareto.analysis import tree_cost_refined
 from pareto.evalfp import eval_float
+from pareto.program import paths as prog_paths
 from pareto.llfront import demangle, functions_of, parse_module
 from pareto.precision import FLOAT32
 
-from difftest_c import (CLANG, INEXACT_OPS, from_bits, to_bits)   # noqa: E402
+from difftest_c import (CLANG, INEXACT_OPS, eval_paths, from_bits,
+                        to_bits)   # noqa: E402
 
 HARNESS = r'''#include <stdio.h>
 #include <stdlib.h>
@@ -108,8 +110,23 @@ def main():
     cannot_judge = []
     bad = []
     for name, (kind, payload, args) in functions_of(ll).items():
-        if kind != 'дерево' or name not in rets or not args:
+        if kind == 'отказ' or name not in rets or not args:
             continue
+        # Функции с ветвлением судятся тоже. Пока судья брал только
+        # прямолинейные, мимо него проходило РОВНО ТО НОВОЕ, что я добавил:
+        # чтение выбора по условию. Проверка, которая не покрывает свежее,
+        # создаёт ложное спокойствие.
+        if kind == 'программа':
+            try:
+                ps = prog_paths(payload)
+            except Exception:
+                continue
+            tree_for_bound = max(
+                (pth.expr for pth in ps),
+                key=lambda t: len(str(t)))
+        else:
+            ps = None
+            tree_for_bound = payload
         ret_c = rets[name]
         proto = ', '.join('float' if f is FLOAT32 else 'double'
                           for _r, f in args)
@@ -137,11 +154,13 @@ def main():
             continue
 
         names = ['a' + reg if reg.isdigit() else reg for reg, _f in args]
-        inexact = uses_inexact(payload)
+        inexact = uses_inexact(tree_for_bound) if ps is None else any(
+            uses_inexact(pth.expr) for pth in ps)
         bound = None
         if inexact:
             try:
-                bound = tree_cost_refined(payload, {n: (lo, hi) for n in names})[1]
+                bound = tree_cost_refined(tree_for_bound,
+                                          {n: (lo, hi) for n in names})[1]
             except Exception:
                 bound = None
 
@@ -168,7 +187,8 @@ def main():
             c_bits = int(got.stdout.strip(), 16)
             c_val = from_bits(c_bits, width)
             try:
-                ours = eval_float(payload, vals)
+                ours = (eval_float(payload, vals) if ps is None
+                        else eval_paths(ps, vals))
             except Exception as e:
                 mism = (dict(vals), 'исключение ' + type(e).__name__, repr(c_val))
                 break
