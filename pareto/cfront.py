@@ -726,6 +726,9 @@ class _Parser:
             got = self.struct_call_init()
             if got is not None:
                 return got
+            got = self.struct_copy_init()
+            if got is not None:
+                return got
         if tok.text == '{':
             return self.block()
         if tok.kind == 'name' and (tok.text in self.structs
@@ -938,6 +941,66 @@ class _Parser:
             tree = val.tree if val.fmt is fmt else _wrap(val.tree, fmt)
             return Typed(tree, fmt)
         return None
+
+    def struct_copy_init(self):
+        """`Vector3 result = v;` — копия структуры из параметра или другой локальной.
+
+        Так написан Vector3Normalize в raylib и ещё десятки функций: структура
+        копируется целиком, а потом правятся отдельные поля. Копия в C — это
+        побитовое присваивание, никакой арифметики, поэтому поля новой переменной
+        просто получают выражения полей старой.
+
+        Источником может быть и поле другой структуры (`b2Vec2 p = t.position;`),
+        поэтому путь читается с точками и стрелками, как обычное имя.
+        """
+        start = self.i
+        tname = self.take().text
+        if tname not in self.structs or self.peek().kind != 'name':
+            self.i = start
+            return None
+        vname = self.take().text
+        if not self.at('='):
+            self.i = start
+            return None
+        self.take('=')
+        if self.peek().kind != 'name':
+            self.i = start
+            return None
+        key = self.take().text
+        while self.peek().text in ('.', '->') and self.peek(1).kind == 'name':
+            sep = self.take().text
+            key = key + sep + self.take().text
+        if not self.at(';'):
+            self.i = start
+            return None
+
+        fields = [(f, fm) for f, fm in self.structs[tname].items()
+                  if isinstance(fm, Format)]
+        out, slots = [], {}
+        for fname, fmt in fields:
+            found = None
+            for sep in ('.', '->'):
+                probe = key + sep + fname
+                if probe in self.vars:
+                    found = self.vars[probe]
+                    break
+            if found is None and key in self.struct_locals:
+                found = self.struct_locals[key][1].get(fname)
+            if found is None:
+                self.i = start
+                return None        # поле источника нам неизвестно — отказ целиком
+            inner_src, fmt_src = found
+            tree = ('var', inner_src)
+            if fmt_src is not fmt:
+                tree = _wrap(tree, fmt)
+            inner = self.fresh(vname + '.' + fname)
+            out.append(('let', inner, tree))
+            slots[fname] = (inner, fmt)
+        self.take(';')
+        self.struct_locals[vname] = (tname, slots)
+        for fname, (inner, fmt) in slots.items():
+            self.vars[vname + '.' + fname] = (inner, fmt)
+        return out
 
     def struct_call_init(self):
         """`b2Vec2 p = b2Add(a, b);` — структурная локальная от вызова функции.

@@ -82,10 +82,12 @@ static double bits_to_d(const char *s) {
 
 int main(int argc, char **argv) {
     %(decls)s
-    %(rettype)s r = %(call)s;
+    %(rettype)s __pareto_r = %(call)s;
     %(outtype)s out;
-    %(scalar)s v = r%(pick)s;
-    memcpy(&out, &v, sizeof(out));
+    /* Имя с подчёркиваниями нарочно: `v` столкнулось с параметром v в raylib,
+       и 34 стенда не собирались с redefinition. */
+    %(scalar)s __pareto_v = __pareto_r%(pick)s;
+    memcpy(&out, &__pareto_v, sizeof(out));
     printf("%(fmt)s", out);
     return 0;
 }
