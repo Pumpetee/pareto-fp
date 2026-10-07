@@ -34,13 +34,36 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 from arith_coverage import SKIP_DIRS, candidate_set   # noqa: E402
 
 from pareto import budget as _budget
-from pareto.api import analyse_c_function
+from pareto.api import analyse_c_function, domain_hazards
 from pareto.cfront import (collect_context, constants, functions, globals_of,
                            macro_aliases, make_resolver, parse_function,
                            struct_result_fields)
 from pareto.codegen import to_c
 
 # Список исключаемых каталогов один на все инструменты — см. arith_coverage.
+
+
+def single_expr(prog):
+    """Выражение единственного пути — чтобы спросить про опасные места."""
+    env, result = {}, None
+    for st in prog['stmts']:
+        if st[0] == 'let':
+            env[st[1]] = st[2].tree if hasattr(st[2], 'tree') else st[2]
+        elif st[0] == 'return':
+            result = st[1]
+        else:
+            return None
+    if result is None:
+        return None
+
+    def walk(node):
+        if node[0] == 'var' and node[1] in env:
+            return walk(env[node[1]])
+        if node[0] in ('num', 'var'):
+            return node
+        return (node[0],) + tuple(walk(k) for k in node[1:])
+
+    return walk(result)
 
 
 def main():
@@ -55,6 +78,8 @@ def main():
                     help='предел времени на функцию; 0 — без предела')
     ap.add_argument('--quiet', action='store_true',
                     help='печатать только нарушителей и итог')
+    ap.add_argument('--no-progress', action='store_true',
+                    help='не показывать ход обхода')
     a = ap.parse_args()
 
     try:
@@ -108,15 +133,24 @@ def main():
     candidates = 0
     unreadable = 0
     holds_as_written = []
+    hazards_found = []
     needs_rewrite = []
     impossible = []
 
+    # Показ хода обязателен. Обход настоящего проекта идёт минутами: на одном
+    # raymath.h это семьсот скалярных выходов, и часть из них требует поиска
+    # формы. Без вывода человек видит мёртвый терминал и убивает процесс, решив,
+    # что инструмент повис. Молчание тут — не аккуратность, а потеря доверия.
+    import time as _time
+    _t0 = _time.monotonic()
+    _files_done = 0
     for f in files:
         try:
             src = f.read_text(encoding='utf-8', errors='replace')
             names = functions(src, types, table)
         except Exception:
             continue
+        _files_done += 1
         for name in names:
             is_cand = name in arith_names
             if not is_cand:
@@ -147,8 +181,31 @@ def main():
                 finally:
                     _budget.clear()
                 base_quick = res.get('base_bound')
-                if not (base_quick is not None and math.isfinite(base_quick)
-                        and base_quick <= a.require):
+                ok_quick = (base_quick is not None
+                            and math.isfinite(base_quick)
+                            and base_quick <= a.require)
+                if not ok_quick:
+                    # Прежде поиска — вопрос, есть ли смысл искать. Если на этих
+                    # диапазонах код способен вернуть вовсе не число (делитель
+                    # накрывает ноль, корень от отрицательного), то границы нет
+                    # не из-за записи, а из-за диапазонов, и НИКАКАЯ перепись
+                    # этого не лечит. Поиск тут — чистая трата: при ±1 таких
+                    # функций в raymath.h большинство, и именно они съедали всё
+                    # время обхода.
+                    tree = single_expr(prog)
+                    hz = []
+                    if tree is not None:
+                        try:
+                            hz = domain_hazards(tree, dom)
+                        except Exception:
+                            hz = []
+                    if hz:
+                        checked += 1
+                        why = '{} от {}'.format(hz[0]['op'],
+                                                hz[0]['argument'][:60])
+                        hazards_found.append((label, f.relative_to(root), why))
+                        continue
+                if not ok_quick:
                     # Не прошло как написано — вот теперь ищем форму.
                     _budget.set_budget(a.budget)
                     try:
@@ -160,6 +217,13 @@ def main():
                     finally:
                         _budget.clear()
                 checked += 1
+                if not a.no_progress and checked % 20 == 0:
+                    # Строка хода идёт в поток ошибок, чтобы не мешать отчёту,
+                    # когда его перенаправляют в файл.
+                    print('  ... проверено {}, файл {}/{}, {:.0f} c'.format(
+                        checked, _files_done, len(files),
+                        _time.monotonic() - _t0),
+                        file=sys.stderr, flush=True)
                 base = res.get('base_bound')
                 best = res.get('best_bound')
                 rel = f.relative_to(root)
@@ -185,6 +249,8 @@ def main():
     print('  держится как написано:        {}'.format(len(holds_as_written)))
     print('  держится после переписи:      {}'.format(len(needs_rewrite)))
     print('  не держится ни в одной форме: {}'.format(len(impossible)))
+    print('  может вернуть НЕ ЧИСЛО на этих диапазонах: {}'.format(
+        len(hazards_found)))
     print('прочитать не удалось: {} из {} кандидатов'.format(unreadable, candidates))
     print()
 
@@ -197,6 +263,12 @@ def main():
                 best))
             if form:
                 print('    вместо: {}'.format(form[:150]))
+        print()
+    if hazards_found and not a.quiet:
+        print('МОЖЕТ ВЕРНУТЬ НЕ ЧИСЛО (переписью не лечится, вопрос к '
+              'диапазонам или к проверке на входе):')
+        for label, rel, why in hazards_found:
+            print('  {} ({}): {}'.format(label, rel, why))
         print()
     if impossible and not a.quiet:
         print('НЕ ДОСТИГАЕТСЯ НИ ОДНОЙ ФОРМОЙ (вопрос к диапазонам или к формату):')
@@ -211,7 +283,7 @@ def main():
               'причины по видам, запустите tools/arith_coverage.py.')
         print()
 
-    if impossible:
+    if impossible or hazards_found:
         return 2
     if needs_rewrite:
         return 1

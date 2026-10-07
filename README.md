@@ -121,7 +121,9 @@ Exit code 0: your requirement holds as the code is written. 1: it does not hold 
 python tools/check_project.py src/ --require 1e-6 --range=-1e3..1e3
 ```
 
-It walks every function, groups them into "holds as written", "holds after the rewrite we print", and "not reachable in any form", and returns the same exit codes. Functions it could not read are counted and printed separately — they are never quietly counted as green.
+It walks every function, groups them into "holds as written", "holds after the rewrite we print", "can return a non-number on these ranges" and "not reachable in any form", and returns the same exit codes. Functions it could not read are counted and printed separately — they are never quietly counted as green.
+
+Expect minutes, not seconds: a 4000-line math header is around 700 scalar outputs, since a function returning a vector is one output per component. Progress is printed as it goes, and `--budget` caps the time spent per function.
 
 The ranges are not optional. Without knowing what the inputs are, there is no error to bound — for us or for anyone.
 
