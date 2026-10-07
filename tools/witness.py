@@ -81,13 +81,72 @@ def hunt(written, rewritten, dom, cases, rng):
     names = sorted(dom)
     best = None
     probes = []
+
+    # 1. Крайние значения и доли от них. Болезнь переполнения промежуточного
+    #    квадрата живёт у верхнего конца, и случайная выборка по середине
+    #    диапазона прошла бы мимо неё.
     for v in (1.0, 0.5, 1e-3, 1e-6, 1e-9, 1e-12):
         probes.append({n: dom[n][1] * v for n in names})
         probes.append({n: dom[n][0] * v for n in names})
     probes.append({n: dom[n][1] for n in names})
     probes.append({n: dom[n][0] for n in names})
+
+    # 2. Абсолютно малые величины, НЕ зависящие от диапазона. У той же болезни
+    #    есть вторая половина: квадрат исчезает в ноль, и функция возвращает
+    #    ровно ноль там, где настоящая длина в формат укладывается. Доля от
+    #    диапазона ±1e20 этого не даст — 1e-12 от 1e20 это ещё 1e8.
+    for tiny in (1e-20, 1e-23, 1e-30, 1e-45, 1e-150, 1e-200, 1e-310):
+        probes.append({n: tiny for n in names})
+        probes.append({n: -tiny for n in names})
+
+    # 3. Прицельно на взаимное уничтожение: почти равные величины. Вычитание
+    #    близких чисел — вторая по распространённости болезнь после переполнения,
+    #    и случайные точки в неё почти никогда не попадают, потому что мера
+    #    множества «x примерно равно y» нулевая.
+    for base in (1.0, 1e3, 1e-3, 1e8):
+        for eps in (0.0, 1e-16, 1e-12, 1e-8):
+            probes.append({n: base * (1.0 + (i * eps))
+                           for i, n in enumerate(names)})
+    if len(names) >= 2:
+        # Пары равных координат: так уничтожаются разности вида v1.x - v2.x,
+        # на которых стоят все функции расстояния.
+        half = len(names) // 2
+        for base in (1.0, 1e3, 1e10):
+            for eps in (0.0, 1e-15, 1e-9):
+                pt = {}
+                for i, n in enumerate(names):
+                    pt[n] = base if i < half else base * (1.0 + eps)
+                probes.append(pt)
+
     for _ in range(cases):
         probes.append({n: rng.uniform(*dom[n]) for n in names})
+
+    # Пробы обязаны лежать В ЗАЯВЛЕННОМ диапазоне. Без этого зажима пробы на
+    # уничтожение брали абсолютные величины и вылезали наружу: у Lerp при
+    # объявленном ±1e3 свидетелем предъявлялся вход amount = 1e8. Показать такое
+    # человеку значило бы доказывать дефект на числах, которые он сам из рассмотрения
+    # исключил. Поймано 06.10.2026 чтением собственного вывода.
+    def inside(pt):
+        out = {}
+        for n in names:
+            lo_n, hi_n = dom[n]
+            v = pt[n]
+            if v != v:
+                return None
+            out[n] = min(max(v, lo_n), hi_n)
+        return out
+
+    clamped, seen_pts = [], set()
+    for pt in probes:
+        fixed = inside(pt)
+        if fixed is None:
+            continue
+        key = tuple(fixed[n] for n in names)
+        if key in seen_pts:
+            continue
+        seen_pts.add(key)
+        clamped.append(fixed)
+    probes = clamped
 
     for pt in probes:
         try:
