@@ -1107,8 +1107,15 @@ def macro_aliases(texts):
     return out
 
 
+# Числовой `#define`. Скобки и приведение типа вокруг значения допускаются:
+# в Chipmunk число пи записано как `((cpFloat)3.14159...)`, и из-за одних только
+# скобок с приведением пять его функций отвергались сообщением «неизвестное имя
+# CP_PI». Приведение здесь значимо и для формата: `(float)3.14` это float32,
+# а `3.14` без суффикса — double.
 _DEF_NUM = re.compile(
-    r"^\s*#\s*define\s+([A-Za-z_]\w*)\s+\(?\s*([-+]?(?:\d+\.\d*|\.\d+|\d+)(?:[eE][-+]?\d+)?)([fFlL]?)\)?\s*$",
+    r"^\s*#\s*define\s+([A-Za-z_]\w*)\s+"
+    r"\(*\s*(?:\(\s*([A-Za-z_]\w*)\s*\)\s*)?"
+    r"([-+]?(?:\d+\.\d*|\.\d+|\d+)(?:[eE][-+]?\d+)?)([fFlL]?)\s*\)*\s*$",
     re.M)
 _GLOBAL = re.compile(
     r"^\s*(?:static\s+)?(?:const\s+)?([A-Za-z_]\w*)\s+([A-Za-z_]\w*)\s*=\s*"
@@ -1157,10 +1164,19 @@ def constants(texts, types):
     out = ConstTable()
     for src in texts:
         for m in _DEF_NUM.finditer(src):
-            name, val, suffix = m.group(1), m.group(2), m.group(3)
+            name, cast, val, suffix = (m.group(1), m.group(2), m.group(3),
+                                       m.group(4))
             if name in out:
                 continue
-            out[name] = _suffixed(val, suffix, out, name)
+            declared = None
+            if cast:
+                if cast == 'float' or types.get(cast) is FLOAT32:
+                    declared = FLOAT32
+                elif cast in ('double', 'long') or types.get(cast) is FLOAT64:
+                    declared = FLOAT64
+                else:
+                    continue        # приведение к целому или к незнакомому типу
+            out[name] = _suffixed(val, suffix, out, name, declared=declared)
         for m in _GLOBAL.finditer(src):
             tname, name, val, suffix = (m.group(1), m.group(2), m.group(3), m.group(4))
             if name in out:
@@ -1330,11 +1346,21 @@ def structs(src, types=None):
                 if re.fullmatch(r"[A-Za-z_]\w*", fn or "") and fn not in fields:
                     fields[fn] = FLOAT64
         for fm in _FIELD_ANY.finditer(body):
-            tname2 = fm.group(1)
-            if tname2 in types or tname2 in ('struct', 'const', 'static', 'unsigned'):
+            tname2, rest = fm.group(1), fm.group(2)
+            if tname2 in ('struct', 'union'):
+                # `struct cpShapeMassInfo massInfo;` — слово struct перед именем
+                # типа в C законно и встречается. Раньше такое поле просто
+                # пропускалось, и выражение shape->massInfo.m отвергалось как
+                # неизвестное имя: поля не было в таблице. На Chipmunk это пять
+                # функций, в которых есть что считать.
+                head = rest.split(None, 1)
+                if len(head) != 2:
+                    continue
+                tname2, rest = head[0], head[1]
+            elif tname2 in types or tname2 in ('const', 'static', 'unsigned'):
                 continue
-            for raw in fm.group(2).split(','):
-                fn = raw.strip()
+            for raw in rest.split(','):
+                fn = raw.strip().lstrip('*').strip()
                 if re.fullmatch(r"[A-Za-z_]\w*", fn or "") and fn not in fields:
                     fields[fn] = ('struct', tname2)
         if fields:
@@ -1357,11 +1383,23 @@ def structs(src, types=None):
                 if re.fullmatch(r"[A-Za-z_]\w*", fn or "") and fn not in fields:
                     fields[fn] = FLOAT64
         for fm in _FIELD_ANY.finditer(body):
-            tname2 = fm.group(1)
-            if tname2 in types or tname2 in ('struct', 'const', 'static', 'unsigned'):
+            tname2, rest = fm.group(1), fm.group(2)
+            if tname2 in ('struct', 'union'):
+                # То же, что и для typedef-структур: слово struct перед именем
+                # типа законно и встречается. У cpShape поле объявлено как
+                # `struct cpShapeMassInfo massInfo;`, и из-за этого
+                # shape->massInfo.m отвергалось как неизвестное имя. Один и тот
+                # же пробел пришлось закрыть в двух местах — цикла разбора
+                # структур здесь два, для typedef и для именованных, и я
+                # поправил сначала только первый.
+                head = rest.split(None, 1)
+                if len(head) != 2:
+                    continue
+                tname2, rest = head[0], head[1]
+            elif tname2 in types or tname2 in ('const', 'static', 'unsigned'):
                 continue
-            for raw in fm.group(2).split(','):
-                fn = raw.strip()
+            for raw in rest.split(','):
+                fn = raw.strip().lstrip('*').strip()
                 if re.fullmatch(r"[A-Za-z_]\w*", fn or "") and fn not in fields:
                     fields[fn] = ('struct', tname2)
         if fields and name not in out:
