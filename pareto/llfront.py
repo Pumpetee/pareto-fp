@@ -77,6 +77,10 @@ BINOP = {'fadd': '+', 'fsub': '-', 'fmul': '*', 'fdiv': '/'}
 _DEFINE = re.compile(r'^define[^@]*@(?P<name>"[^"]+"|[\w.$]+)\s*\((?P<args>[^)]*)\)')
 _ARG = re.compile(r'(float|double)\b[^,]*?%(?P<reg>[\w.]+)')
 _HEX = re.compile(r'^0x([0-9A-Fa-f]+)$')
+# Постоянная ОДИНАРНОЙ точности печатается с приставкой f0x и восемью цифрами:
+# f0x34000000 это FLT_EPSILON. Без этого разбор спотыкался на настоящем коде
+# управления PX4, где epsilon сравнивается с нормой вектора.
+_HEXF = re.compile(r'^f0x([0-9A-Fa-f]{8})$')
 
 
 # Предикаты сравнения. Берём только УПОРЯДОЧЕННЫЕ: `olt` истинно, когда оба
@@ -85,6 +89,22 @@ _HEX = re.compile(r'^0x([0-9A-Fa-f]+)$')
 # значило бы читать другую программу. Такие отвергаем.
 FCMP = {'olt': '<', 'ole': '<=', 'ogt': '>', 'oge': '>=', 'oeq': '==',
         'one': '!='}
+
+# Неупорядоченные предикаты истинны ЕЩЁ И когда один из операндов NaN. Компилятор
+# ставит их постоянно: `fabsf(x) < c` в ветвлении превращается в `ugt` от
+# отрицания. Отвергать их значило бы терять настоящий код управления PX4 —
+# constrainXY отвергалась ровно на этом.
+#
+# Принимаем как обычное сравнение, и вот на каком основании. Расходимся мы с
+# компилятором только если операнд оказался NaN. Но NaN в выражении означает, что
+# программа уже возвращает не число, и такой случай ловится ОТДЕЛЬНО: граница для
+# него не доказывается, а опасное место называется прямо. То есть там, где мы
+# вообще что-то утверждаем, NaN исключён, и предикаты совпадают.
+#
+# Страховка не на слове: судья исполняет функцию и сравнивает с нашим ответом, и
+# неверно выбранная ветка даёт расхождение, которое он покажет.
+FCMP_UNORDERED = {'ult': '<', 'ule': '<=', 'ugt': '>', 'uge': '>=',
+                  'ueq': '==', 'une': '!='}
 
 
 def _same(a, b):
@@ -116,6 +136,34 @@ def _negates(t, base):
             and _same(t[2], base))
 
 
+NAN_FREE_OPS = {'+', '-', '*', 'neg', 'fabs', 'fmin', 'fmax', 'num', 'var',
+                'f32', 'f16'}
+
+
+def nan_free_shape(tree):
+    """Может ли выражение дать NaN. Судим по форме, односторонне.
+
+    «Нет» значит доказано, «да» значит не доказано. Деление, корень и libm
+    способны дать NaN, обычная арифметика над числами — нет.
+
+    Нужно для узнавания образца минимума и максимума. `select(a < b, a, b)` и
+    `fmin(a, b)` совпадают, пока ни один операнд не NaN. Если NaN оказался
+    ВТОРЫМ операндом, они расходятся: выбор отдаёт второй (сравнение ложно), а
+    IEEE fmin — первый, как не-NaN. Ровно это и случилось на limitTilt из PX4,
+    где acosf получает аргумент вне области: исполнение дало 0, наше чтение NaN.
+    Поэтому образец сворачивается только когда NaN исключён по форме, иначе
+    остаётся настоящим ветвлением — дороже, зато точно.
+    """
+    if not isinstance(tree, tuple):
+        return False
+    op = tree[0]
+    if op not in NAN_FREE_OPS:
+        return False
+    if op in ('num', 'var'):
+        return True
+    return all(nan_free_shape(k) for k in tree[1:])
+
+
 def recognise_select(cond, a, b):
     """Узнать в выборе обычную операцию: минимум, максимум или модуль.
 
@@ -125,6 +173,8 @@ def recognise_select(cond, a, b):
     `fabs` у нас уже есть, и ошибки они не вносят вовсе.
     """
     op, left, right = cond
+    if not (nan_free_shape(a) and nan_free_shape(b)):
+        return None          # NaN не исключён — сворачивать нельзя
     if op in ('<', '<='):
         if _same(a, left) and _same(b, right):
             return ('fmin', left, right)
@@ -164,6 +214,12 @@ def _value(token, env, fmt_hint):
         return env[key]
     if token in ('zeroinitializer', 'undef', 'poison'):
         raise LLError('неопределённое значение в выражении')
+    m = _HEXF.match(token)
+    if m:
+        import struct
+        bits = int(m.group(1), 16)
+        return (('num', struct.unpack('<f', struct.pack('<I', bits))[0]),
+                fmt_hint)
     m = _HEX.match(token)
     if m:
         # LLVM печатает вещественные постоянные шестнадцатеричным образцом
@@ -174,9 +230,21 @@ def _value(token, env, fmt_hint):
         return (('num', struct.unpack('<d', struct.pack('<Q', bits))[0]),
                 fmt_hint)
     try:
-        return (('num', float(token)), fmt_hint)
+        value = float(token)
     except ValueError:
         raise LLError('операнд {!r} не разобран'.format(token))
+    # Постоянная ОДИНАРНОЙ точности печатается десятичной записью, которая
+    # кругом-обратно верна во float32 — но не в double. Читая `-9.806650e+00`
+    # как число двойной точности, мы получали НЕ ту постоянную, что в программе:
+    # float32(9.80665) равен 9.8066501617431640625. Разница в младшей единице,
+    # и ровно она дала расхождение с исполнением на трёх функциях управления PX4.
+    # Поймано судьёй.
+    if fmt_hint is not None and value == value:
+        try:
+            value = fmt_hint.round(value)
+        except Exception:
+            pass
+    return (('num', value), fmt_hint)
 
 
 def parse_module(text):
@@ -213,12 +281,231 @@ def build(args, body):
 def build_program(args, body):
     """Программа функции операторами, как в pareto/program.py.
 
-    Отличие от build одно: выбор по условию становится ветвлением, а не отказом.
-    Прямолинейная функция даёт список из одного возврата, то есть частный
-    случай, а не отдельная ветка кода.
+    Сначала пробуем прочесть как один блок — это самый частый и самый дешёвый
+    случай. Если в теле переходы между блоками, читаем по графу: досрочные
+    возвраты и слияния разрешаются дублированием путей.
     """
-    stmts, result = _walk(args, body)
-    return list(stmts) + [('return', result)]
+    try:
+        stmts, result = _walk(args, body)
+        return list(stmts) + [('return', result)]
+    except LLError:
+        return walk_cfg(args, body)
+
+
+MAX_LL_PATHS = 64
+
+
+def split_blocks(body):
+    """Тело на блоки: метка -> строки. Первый блок без метки — входной."""
+    blocks = {'entry': []}
+    label = 'entry'
+    for raw in body:
+        line = raw.strip()
+        # Комментарий отрезаем ДО разбора. Метка блока печатается так:
+        #   13:                      ; preds = %7, %10
+        # и проверка «в строке нет знака равенства» срабатывала на слове preds,
+        # поэтому метка принималась за инструкцию и обход рвался сообщением
+        # «блок кончается без перехода».
+        cut = line.find(';')
+        if cut >= 0:
+            line = line[:cut].strip()
+        if not line:
+            continue
+        m = re.match(r'^([-\w.$]+):\s*$', line)
+        if m:
+            label = m.group(1)
+            blocks.setdefault(label, [])
+            continue
+        blocks[label].append(line)
+    return blocks
+
+
+def walk_cfg(args, body):
+    """Программа функции по ГРАФУ блоков, а не по одному блоку.
+
+    Досрочный возврат в живом коде управления встречается постоянно:
+    `if (norm < eps) return v0.normalized() * max;`. Компилятор делает из этого
+    отдельные блоки с переходами и узлами слияния, и пока читался один блок,
+    такие функции отвергались целиком — а это настоящий код PX4 (constrainXY).
+
+    Обход идёт ПО ПУТЯМ с дублированием блоков, и это ключ к слиянию: узел phi
+    выбирает значение по тому, ОТКУДА пришли, а на известном пути выбор
+    однозначен. Ничего вычислять не нужно. Ровно так же устроен разбор
+    ветвлений в C: каждый путь прямолинеен.
+
+    Цикл отвергается: повторный вход в блок на одном пути означает неизвестное
+    число шагов, а значение за ним нам неизвестно тоже.
+    """
+    blocks = split_blocks(body)
+    # Входной блок в представлении БЕЗЫМЯННЫЙ, а слияния ссылаются на него
+    # номером: нумерация безымянных значений идёт сквозная, и после аргументов
+    # %0..%n-1 входной блок получает %n. Угадывать номер не нужно — он
+    # вычисляется: это та метка в слияниях, которой нет среди блоков.
+    referenced = set()
+    for _lbl, _lines in blocks.items():
+        for _l in _lines:
+            if _l.split()[0:1] == ['%' + _l.split()[0].lstrip('%')] or 'phi ' in _l:
+                for pm in re.finditer(r'\]\s*,?|%([-\w.$]+)\s*\]', _l):
+                    if pm.group(1):
+                        referenced.add(pm.group(1))
+    entry_aliases = {r for r in referenced if r not in blocks}
+    for alias in entry_aliases:
+        blocks[alias] = blocks['entry']
+    base_env = {}
+    for reg, fmt in args:
+        base_env[reg] = (('var', 'a' + reg if reg.isdigit() else reg), fmt)
+    counter = [0]
+
+    def go(label, env, conds, came_from, seen, depth):
+        if label in seen:
+            raise LLError('в теле цикл: блок {} встречается на пути дважды'
+                          .format(label))
+        if depth > MAX_LL_PATHS:
+            raise LLError('слишком глубокое ветвление')
+        seen = seen | {label}
+        env = dict(env)
+        conds = dict(conds)
+        stmts = []
+        for line in blocks.get(label, []):
+            if line.startswith('ret '):
+                parts = line.split()
+                if len(parts) < 3:
+                    raise LLError('возврат без значения')
+                return stmts + [('return', _value(parts[2], env, None)[0])]
+            if line.startswith('br '):
+                m1 = re.match(r'br\s+label\s+%([-\w.$]+)', line)
+                if m1:
+                    return stmts + go(m1.group(1), env, conds, label, seen,
+                                      depth + 1)
+                m2 = re.match(r'br\s+i1\s+(\S+?),\s*label\s+%([-\w.$]+),'
+                              r'\s*label\s+%([-\w.$]+)', line)
+                if m2 is None:
+                    raise LLError('переход не разобран: ' + line[:60])
+                ckey = m2.group(1).lstrip('%')
+                if ckey not in conds:
+                    raise LLError('условие перехода получено не сравнением')
+                then_s = go(m2.group(2), env, conds, label, seen, depth + 1)
+                else_s = go(m2.group(3), env, conds, label, seen, depth + 1)
+                return stmts + [('if', conds[ckey], then_s, else_s)]
+            if line.startswith('switch ') or line.startswith('indirectbr'):
+                raise LLError('switch или косвенный переход в теле')
+            if line.startswith('unreachable'):
+                raise LLError('недостижимый конец блока')
+            for bad, why in (('load ', 'чтение памяти'),
+                             ('store ', 'запись памяти'),
+                             ('getelementptr', 'адресная арифметика'),
+                             ('alloca', 'локальная память')):
+                if bad in line:
+                    raise LLError(why + ' в теле')
+            m = re.match(r'^%([-\w.$]+)\s*=\s*(.+)$', line)
+            if m is None:
+                if line.startswith('call ') or line.startswith('tail call '):
+                    continue
+                raise LLError('строка не разобрана: ' + line[:60])
+            dst, rest = m.group(1), m.group(2)
+            if rest.split()[0] == 'phi':
+                mm = re.match(r'phi\s+(?:fast\s+)*(float|double)\s+(.*)$', rest)
+                if mm is None:
+                    raise LLError('слияние не разобрано: ' + rest[:60])
+                fmt_p = TYPES[mm.group(1)]
+                picked = None
+                for pm in re.finditer(
+                        r'\[\s*([^,\]]+?)\s*,\s*%([-\w.$]+)\s*\]', mm.group(2)):
+                    if pm.group(2) == came_from:
+                        picked = pm.group(1)
+                        break
+                if picked is None:
+                    raise LLError('в слиянии нет ветви из блока {}'.format(
+                        came_from))
+                env[dst] = (_value(picked, env, fmt_p)[0], fmt_p)
+                continue
+            _instr(dst, rest, env, conds, stmts, counter)
+        raise LLError('блок {} кончается без перехода'.format(label))
+
+    entry_label = sorted(entry_aliases)[0] if entry_aliases else 'entry'
+    return go(entry_label, base_env, {}, None, frozenset(), 0)
+
+
+def _instr(dst, rest, env, conds, stmts, counter):
+    """Одна инструкция представления. Общая для обхода блока и обхода графа.
+
+    Выделено отдельно не для красоты: обход графа блоков должен понимать те же
+    инструкции, что и обход одного блока, и дублировать их значило бы однажды
+    поправить в одном месте и забыть в другом.
+    """
+
+    op = rest.split()[0]
+    if op in ('tail', 'musttail', 'notail'):
+        rest = rest.split(None, 1)[1]
+        op = rest.split()[0]
+
+    if op in BINOP:
+        mm = re.match(r'\w+\s+(?:[\w()]+\s+)*?(float|double)\s+(.+)$', rest)
+        if mm is None:
+            raise LLError('арифметика не разобрана: ' + rest[:60])
+        fmt = TYPES[mm.group(1)]
+        a_s, b_s = [t.strip() for t in mm.group(2).split(',')[:2]]
+        a, b = _value(a_s, env, fmt), _value(b_s, env, fmt)
+        node = (BINOP[op], a[0], b[0])
+        env[dst] = (_round(node, fmt), fmt)
+        return
+    if op == 'fneg':
+        mm = re.search(r'(float|double)\s+(\S+)', rest)
+        if mm is None:
+            raise LLError('fneg не разобран')
+        fmt = TYPES[mm.group(1)]
+        env[dst] = (('neg', _value(mm.group(2), env, fmt)[0]), fmt)
+        return
+    if op in ('fpext', 'fptrunc'):
+        mm = re.search(r'(float|double)\s+(\S+)\s+to\s+(float|double)', rest)
+        if mm is None:
+            raise LLError('смена точности не разобрана')
+        src = _value(mm.group(2), env, TYPES[mm.group(1)])[0]
+        dst_fmt = TYPES[mm.group(3)]
+        env[dst] = ((_round(src, dst_fmt) if op == 'fptrunc' else src),
+                    dst_fmt)
+        return
+    if op == 'call':
+        env[dst] = _call(rest, env)
+        return
+    if op == 'fcmp':
+        mm = re.match(r'fcmp\s+(?:fast\s+|nnan\s+|ninf\s+)*(\w+)\s+'
+                      r'(float|double)\s+(.+)$', rest)
+        if mm is None:
+            raise LLError('сравнение не разобрано: ' + rest[:60])
+        pred = mm.group(1)
+        relop = FCMP.get(pred) or FCMP_UNORDERED.get(pred)
+        if relop is None:
+            raise LLError('предикат сравнения {!r} неизвестен'.format(pred))
+        fmt_c = TYPES[mm.group(2)]
+        l_s, r_s = [t.strip() for t in mm.group(3).split(',')[:2]]
+        conds[dst] = (relop,
+                      _value(l_s, env, fmt_c)[0],
+                      _value(r_s, env, fmt_c)[0])
+        return
+    if op == 'select':
+        mm = re.match(r'select\s+i1\s+(\S+?),\s*(float|double)\s+(\S+?),'
+                      r'\s*(float|double)\s+(\S+)$', rest)
+        if mm is None:
+            raise LLError('выбор не разобран: ' + rest[:60])
+        ckey = mm.group(1).lstrip('%')
+        if ckey not in conds:
+            raise LLError('условие выбора получено не сравнением')
+        fmt_s = TYPES[mm.group(2)]
+        a_v = _value(mm.group(3), env, fmt_s)[0]
+        b_v = _value(mm.group(5), env, fmt_s)[0]
+        got = recognise_select(conds[ckey], a_v, b_v)
+        if got is not None:
+            env[dst] = (got, fmt_s)
+            return
+        # Обычный выбор: это два пути исполнения. Имя результата одно на обе
+        # ветви, иначе дальше по тексту сослались бы на имя из одной из них.
+        inner = 'sel' + dst
+        stmts.append(('if', conds[ckey],
+                      [('let', inner, a_v)], [('let', inner, b_v)]))
+        env[dst] = (('var', inner), fmt_s)
+        return
+    raise LLError('операция {!r} не поддержана'.format(op))
 
 
 def _walk(args, body):
@@ -231,6 +518,7 @@ def _walk(args, body):
     env = {}
     conds = {}
     stmts = []
+    counter = [0]
     for reg, fmt in args:
         env[reg] = (('var', 'a' + reg if reg.isdigit() else reg), fmt)
     result = None
@@ -264,80 +552,7 @@ def _walk(args, body):
                 continue
             raise LLError('строка не разобрана: ' + line[:60])
         dst, rest = m.group('dst'), m.group('rest')
-
-        op = rest.split()[0]
-        if op in ('tail', 'musttail', 'notail'):
-            rest = rest.split(None, 1)[1]
-            op = rest.split()[0]
-
-        if op in BINOP:
-            mm = re.match(r'\w+\s+(?:[\w()]+\s+)*?(float|double)\s+(.+)$', rest)
-            if mm is None:
-                raise LLError('арифметика не разобрана: ' + rest[:60])
-            fmt = TYPES[mm.group(1)]
-            a_s, b_s = [t.strip() for t in mm.group(2).split(',')[:2]]
-            a, b = _value(a_s, env, fmt), _value(b_s, env, fmt)
-            node = (BINOP[op], a[0], b[0])
-            env[dst] = (_round(node, fmt), fmt)
-            continue
-        if op == 'fneg':
-            mm = re.search(r'(float|double)\s+(\S+)', rest)
-            if mm is None:
-                raise LLError('fneg не разобран')
-            fmt = TYPES[mm.group(1)]
-            env[dst] = (('neg', _value(mm.group(2), env, fmt)[0]), fmt)
-            continue
-        if op in ('fpext', 'fptrunc'):
-            mm = re.search(r'(float|double)\s+(\S+)\s+to\s+(float|double)', rest)
-            if mm is None:
-                raise LLError('смена точности не разобрана')
-            src = _value(mm.group(2), env, TYPES[mm.group(1)])[0]
-            dst_fmt = TYPES[mm.group(3)]
-            env[dst] = ((_round(src, dst_fmt) if op == 'fptrunc' else src),
-                        dst_fmt)
-            continue
-        if op == 'call':
-            env[dst] = _call(rest, env)
-            continue
-        if op == 'fcmp':
-            mm = re.match(r'fcmp\s+(?:fast\s+|nnan\s+|ninf\s+)*(\w+)\s+'
-                          r'(float|double)\s+(.+)$', rest)
-            if mm is None:
-                raise LLError('сравнение не разобрано: ' + rest[:60])
-            pred = mm.group(1)
-            if pred not in FCMP:
-                raise LLError('предикат {!r} неупорядоченный или неизвестный: '
-                              'приравнивать его к обычному сравнению значило бы '
-                              'читать другую программу'.format(pred))
-            fmt_c = TYPES[mm.group(2)]
-            l_s, r_s = [t.strip() for t in mm.group(3).split(',')[:2]]
-            conds[dst] = (FCMP[pred],
-                          _value(l_s, env, fmt_c)[0],
-                          _value(r_s, env, fmt_c)[0])
-            continue
-        if op == 'select':
-            mm = re.match(r'select\s+i1\s+(\S+?),\s*(float|double)\s+(\S+?),'
-                          r'\s*(float|double)\s+(\S+)$', rest)
-            if mm is None:
-                raise LLError('выбор не разобран: ' + rest[:60])
-            ckey = mm.group(1).lstrip('%')
-            if ckey not in conds:
-                raise LLError('условие выбора получено не сравнением')
-            fmt_s = TYPES[mm.group(2)]
-            a_v = _value(mm.group(3), env, fmt_s)[0]
-            b_v = _value(mm.group(5), env, fmt_s)[0]
-            got = recognise_select(conds[ckey], a_v, b_v)
-            if got is not None:
-                env[dst] = (got, fmt_s)
-                continue
-            # Обычный выбор: это два пути исполнения. Имя результата одно на обе
-            # ветви, иначе дальше по тексту сослались бы на имя из одной из них.
-            inner = 'sel' + dst
-            stmts.append(('if', conds[ckey],
-                          [('let', inner, a_v)], [('let', inner, b_v)]))
-            env[dst] = (('var', inner), fmt_s)
-            continue
-        raise LLError('операция {!r} не поддержана'.format(op))
+        _instr(dst, rest, env, conds, stmts, counter)
 
     if result is None:
         raise LLError('в теле нет возврата значения')
@@ -453,7 +668,11 @@ def functions_of(path):
         except LLError as e:
             out[name] = ('отказ', str(e), args)
             continue
-        if len(stmts) == 1:
+        # Признак «одно выражение» — это оператор ВОЗВРАТА, а не длина списка.
+        # Обход графа возвращает один оператор ветвления, и по длине он
+        # выглядел как выражение: за дерево принималось условие, а дальше всё
+        # падало. Поймано судьёй.
+        if len(stmts) == 1 and stmts[0][0] == 'return':
             out[name] = ('дерево', stmts[0][1], args)
         else:
             out[name] = ('программа', stmts, args)

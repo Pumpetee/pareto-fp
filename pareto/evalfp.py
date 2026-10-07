@@ -115,8 +115,21 @@ def eval_float(tree, env):
     if op == 'atan2':
         return math.atan2(a, b)
     if op == 'fmin':
+        # IEEE-754 требует вернуть НЕ-NaN операнд, если второй NaN. Питоновский
+        # min этого не делает: min(nan, 0.0) отдаёт nan, потому что сравнение с
+        # NaN ложно и min возвращает первый аргумент. Из-за этого наш ответ
+        # расходился с исполнением на limitTilt из PX4, где acosf получает
+        # аргумент вне области и даёт NaN. Поймано судьёй.
+        if a != a:
+            return b
+        if b != b:
+            return a
         return min(a, b)
     if op == 'fmax':
+        if a != a:
+            return b
+        if b != b:
+            return a
         return max(a, b)
     if op == '+':
         return a + b
