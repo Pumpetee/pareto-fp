@@ -37,7 +37,7 @@ def to_js(t):
         return 'Math.hypot(' + to_js(t[1]) + ', ' + to_js(t[2]) + ')'
     if op == 'atan2':
         return 'Math.atan2(' + to_js(t[1]) + ', ' + to_js(t[2]) + ')'
-    if op in ('sin', 'cos', 'atan'):
+    if op in ('sin', 'cos', 'atan', 'asin', 'acos'):
         return 'Math.' + op + '(' + to_js(t[1]) + ')'
     if op == 'fabs':
         return 'Math.abs(' + to_js(t[1]) + ')'
@@ -57,7 +57,8 @@ def to_js(t):
 # есть ломался не отчёт, а продукт. Найдено 06.10.2026 при показе хода фаззера.
 C_FUN = {'sqrt': 'sqrt', 'exp': 'exp', 'log': 'log',
          'expm1': 'expm1', 'log1p': 'log1p',
-         'sin': 'sin', 'cos': 'cos', 'atan': 'atan', 'fabs': 'fabs'}
+         'sin': 'sin', 'cos': 'cos', 'atan': 'atan', 'fabs': 'fabs',
+         'asin': 'asin', 'acos': 'acos'}
 
 
 def to_c(t):
@@ -95,7 +96,7 @@ def to_text(t):
     if op == 'neg':
         return '-' + to_text(t[1])
     if op in ('sqrt', 'exp', 'log', 'expm1', 'log1p',
-              'sin', 'cos', 'atan', 'fabs'):
+              'sin', 'cos', 'atan', 'fabs', 'asin', 'acos'):
         return op + '(' + to_text(t[1]) + ')'
     if op in ('fma', 'hypot', 'atan2', 'fmin', 'fmax'):
         return op + '(' + ', '.join(to_text(k) for k in t[1:]) + ')'

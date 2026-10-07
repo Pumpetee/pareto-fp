@@ -102,6 +102,12 @@ def eval_float(tree, env):
         return abs(eval_float(tree[1], env))
     if op in ('sin', 'cos', 'atan'):
         return getattr(math, op)(eval_float(tree[1], env))
+    if op in ('asin', 'acos'):
+        v = eval_float(tree[1], env)
+        # Вне отрезка живой код даёт NaN, а не исключение.
+        if v != v or v < -1.0 or v > 1.0:
+            return NAN
+        return getattr(math, op)(v)
     a = eval_float(tree[1], env)
     b = eval_float(tree[2], env)
     if op == 'hypot':

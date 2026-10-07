@@ -51,6 +51,10 @@ CALL1 = {
     'llvm.sin.f32': 'sin', 'llvm.sin.f64': 'sin', 'sinf': 'sin', 'sin': 'sin',
     'llvm.cos.f32': 'cos', 'llvm.cos.f64': 'cos', 'cosf': 'cos', 'cos': 'cos',
     'atanf': 'atan', 'atan': 'atan',
+    'llvm.asin.f32': 'asin', 'llvm.asin.f64': 'asin',
+    'asinf': 'asin', 'asin': 'asin',
+    'llvm.acos.f32': 'acos', 'llvm.acos.f64': 'acos',
+    'acosf': 'acos', 'acos': 'acos',
 }
 
 CALL2 = {

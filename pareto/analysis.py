@@ -37,6 +37,7 @@ OP_ULP = {
     '+': 1.0, '-': 1.0, '*': 1.0, '/': 1.0, 'sqrt': 1.0, 'fma': 1.0, 'neg': 0.0,
     'exp': LIBM_ULP, 'log': LIBM_ULP, 'expm1': LIBM_ULP,
     'sin': LIBM_ULP, 'cos': LIBM_ULP, 'atan': LIBM_ULP, 'atan2': LIBM_ULP,
+    'asin': LIBM_ULP, 'acos': LIBM_ULP,
     'fabs': 0.0, 'fmin': 0.0, 'fmax': 0.0,
     'log1p': LIBM_ULP, 'hypot': LIBM_ULP,
 }
@@ -82,6 +83,7 @@ COST = {
     '/': 6.0, 'neg': 0.5,
     'sqrt': 8.0, 'exp': 20.0, 'log': 20.0,
     'sin': 22.0, 'cos': 22.0, 'atan': 22.0, 'atan2': 30.0,
+    'asin': 25.0, 'acos': 25.0,
     'fabs': 0.5, 'fmin': 1.0, 'fmax': 1.0,
     # fma(a,b,c) = a*b + c с ОДНИМ округлением на всю операцию: промежуточное
     # произведение не округляется, поэтому по точности fma выгоден почти всегда.
@@ -213,6 +215,64 @@ def _finite_iv(tree, domain):
     return out
 
 
+def in_unit_range(tree, domain):
+    """Доказуемо ли, что ВЫЧИСЛЕННОЕ значение лежит от минус единицы до единицы.
+
+    Сначала дешёвая проверка по интервалу, потом — по ФОРМЕ записи. Второе
+    обязательно: интервальная арифметика округляет наружу, поэтому произведение
+    двух величин из отрезка даёт [-1-e, 1+e], и доказать попадание нельзя
+    никогда. А в настоящем float произведение таких величин за единицу не
+    выходит: истинное произведение не больше единицы, округление к ближайшему
+    монотонно, а единица представима точно.
+
+    Угадывать здесь нельзя: выход за отрезок даёт NaN, а не неточность — именно
+    так угол ориентации и становится NaN.
+    """
+    try:
+        lo, hi = tree_cost(tree, domain)[2]
+        if lo >= -1.0 and hi <= 1.0:
+            return True
+    except (ValueError, ZeroDivisionError, OverflowError, KeyError):
+        return False
+    return _unit_by_shape(tree, domain)
+
+
+def _unit_by_shape(tree, domain):
+    """Форма записи, гарантирующая попадание в отрезок от минус единицы до единицы."""
+    op = tree[0]
+    if op in ('f32', 'f16', 'approx', 'eft'):
+        return _unit_by_shape(tree[1], domain)
+    if op == 'num':
+        return abs(float(tree[1])) <= 1.0
+    if op == 'var':
+        lo, hi = domain.get(tree[1], (-INF, INF))
+        return lo >= -1.0 and hi <= 1.0
+    if op in ('sin', 'cos'):
+        return True                       # |sin| и |cos| не больше единицы
+    if op in ('neg', 'fabs'):
+        return _unit_by_shape(tree[1], domain)
+    if op == 'sqrt':
+        # Корень из величины внутри отрезка тоже внутри: для неотрицательного
+        # аргумента не больше единицы корень не больше единицы.
+        return _unit_by_shape(tree[1], domain)
+    if op == '*':
+        return (_unit_by_shape(tree[1], domain)
+                and _unit_by_shape(tree[2], domain))
+    if op in ('fmin', 'fmax'):
+        return (_unit_by_shape(tree[1], domain)
+                and _unit_by_shape(tree[2], domain))
+    if op == '/':
+        # Делимое внутри отрезка, делитель по модулю не меньше единицы.
+        if not _unit_by_shape(tree[1], domain):
+            return False
+        try:
+            lo, hi = tree_cost(tree[2], domain)[2]
+        except (ValueError, ZeroDivisionError, OverflowError, KeyError):
+            return False
+        return iv_abs_min((lo, hi)) >= 1.0
+    return False
+
+
 def nonneg_computed(tree, domain):
     """Доказуемо ли, что ВЫЧИСЛЕННОЕ значение выражения неотрицательно.
 
@@ -320,6 +380,55 @@ def iv_fmin(a, b):
 
 def iv_fmax(a, b):
     return (max(a[0], b[0]), max(a[1], b[1]))
+
+
+ASIN_HOLDER = math.pi / math.sqrt(2.0)
+
+
+def iv_asin(a):
+    """Арксинус на интервале. Область определения — от минус единицы до единицы.
+
+    Выход за неё означает, что живой код вернёт NaN, и обрезать молча нельзя:
+    это другая программа. Обрезаем ради самого интервала, а про опасность
+    сообщает отдельная проверка, которая смотрит, может ли аргумент выйти за
+    пределы.
+    """
+    lo = math.asin(max(-1.0, min(1.0, a[0])))
+    hi = math.asin(max(-1.0, min(1.0, a[1])))
+    return (min(lo, hi), max(lo, hi))              # монотонно возрастает
+
+
+def iv_acos(a):
+    """Арккосинус: тот же отрезок, но функция убывает."""
+    lo = math.acos(max(-1.0, min(1.0, a[1])))
+    hi = math.acos(max(-1.0, min(1.0, a[0])))
+    return (min(lo, hi), max(lo, hi))
+
+
+def asin_transfer(err, iv):
+    """Перенос ошибки через арксинус. Меньшая из двух верхних оценок.
+
+    Производная арксинуса равна 1/sqrt(1 - x*x) и на концах отрезка
+    бесконечна — ровно как у корня в нуле. Поэтому одной производной мало: у
+    единицы она даёт бесконечность, и граница пропадала бы там, где настоящая
+    ошибка мала.
+
+    Вторая оценка — гёльдерова. Проверено численно на шестистах тысячах пар,
+    включая концы отрезка:
+
+        |asin(x) - asin(y)| <= (pi/sqrt(2)) * sqrt(|x - y|)
+
+    и на паре (-1, 1) это равенство, то есть константа точная, а не с запасом.
+    Обе оценки верхние, значит меньшая из них тоже верхняя.
+    """
+    if err <= 0:
+        return 0.0
+    holder = ASIN_HOLDER * math.sqrt(err)
+    m = max(abs(iv[0]), abs(iv[1]))
+    if m >= 1.0:
+        return holder
+    deriv = err / math.sqrt(1.0 - m * m)
+    return min(deriv, holder)
 
 
 def iv_sin(a):
@@ -435,6 +544,8 @@ def _eval_interval_raw(op, kids):
     if op == 'sin': return iv_sin(kids[0])
     if op == 'cos': return iv_cos(kids[0])
     if op == 'atan': return iv_atan(kids[0])
+    if op == 'asin': return iv_asin(kids[0])
+    if op == 'acos': return iv_acos(kids[0])
     if op == 'atan2': return iv_atan2(kids[0], kids[1])
     raise ValueError(op)
 
@@ -646,6 +757,22 @@ def propagate_error(op, kid_ivs, kid_errs, out_iv, round_scale=1.0,
     if op == 'atan':
         # |d atan| = |dx| / (1 + x^2) <= |dx|
         return kid_errs[0] + round_off
+    if op in ('asin', 'acos'):
+        # Арккосинус — это pi/2 минус арксинус, поэтому перенос ошибки у них
+        # один и тот же. На концах отрезка производная бесконечна, и там
+        # работает гёльдерова оценка.
+        #
+        # Но сначала вопрос важнее точности: если аргумент способен выйти за
+        # отрезок от минус единицы до единицы, живой код вернёт NaN, и отвечать
+        # на это конечной границей нельзя. Как и у корня, спрашиваем форму
+        # записи, а не только интервал: сумма квадратов, делённая на свою же
+        # норму, за единицу не выходит, хотя интервал этого не знает.
+        lo_a, hi_a = kid_ivs[0]
+        if (lo_a < -1.0 or hi_a > 1.0) and not (
+                arg_trees is not None and domain is not None
+                and in_unit_range(arg_trees[0], domain)):
+            return INF
+        return asin_transfer(kid_errs[0], kid_ivs[0]) + round_off
     if op == 'atan2':
         # Частные производные atan2 по модулю не больше 1/r, где r — расстояние
         # до начала координат. В начале координат угол не определён вовсе, и

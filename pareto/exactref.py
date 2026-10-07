@@ -138,6 +138,22 @@ def exact_tracked(tree, env):
         v, m = exact_tracked(tree[1], env)
         r = {'sin': _dec_sin, 'cos': _dec_cos, 'atan': _dec_atan}[op](v)
         return r, max(m, abs(r))
+    if op in ('asin', 'acos'):
+        # Эталон для арксинуса через арктангенс: asin(x) = atan(x/sqrt(1-x*x)),
+        # а на концах отрезка отдельно, потому что знаменатель там ноль.
+        # Арккосинус — это pi/2 минус арксинус.
+        v, m = exact_tracked(tree[1], env)
+        if v > 1 or v < -1:
+            raise ValueError('аргумент вне области определения')
+        if v == 1:
+            r = _pi() / 2
+        elif v == -1:
+            r = -_pi() / 2
+        else:
+            r = _dec_atan(v / (1 - v * v).sqrt())
+        if op == 'acos':
+            r = _pi() / 2 - r
+        return r, max(m, abs(r))
     if op == 'atan2':
         y, my = exact_tracked(tree[1], env)
         x, mx = exact_tracked(tree[2], env)

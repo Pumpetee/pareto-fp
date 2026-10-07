@@ -239,7 +239,8 @@ def domain_hazards(tree, dom):
     нижний конец ноль, но отрицательной в IEEE-754 не бывает, и записывать её в
     опасные было бы ложной тревогой.
     """
-    from pareto.analysis import nonneg_computed, tree_cost, iv_abs_min
+    from pareto.analysis import (in_unit_range, nonneg_computed, tree_cost,
+                                 iv_abs_min)
     from pareto.codegen import to_c
 
     out, seen = [], set()
@@ -260,6 +261,15 @@ def domain_hazards(tree, dom):
                 if lo < 0.0 and not nonneg_computed(node[1], dom):
                     add_hit('sqrt', node[1], lo, hi,
                             'the argument can be negative, so the code returns NaN')
+            elif op in ('asin', 'acos'):
+                lo, hi = iv(node[1])
+                if (lo < -1.0 or hi > 1.0) and not in_unit_range(node[1], dom):
+                    add_hit(op, node[1], lo, hi,
+                            'the argument can leave the interval from -1 to 1, '
+                            'and then the code returns NaN. This is the classic '
+                            'way an attitude angle becomes NaN: the value is '
+                            'mathematically within range but rounding pushes it '
+                            'just past 1')
             elif op == 'log':
                 lo, hi = iv(node[1])
                 if lo <= 0.0:
