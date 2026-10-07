@@ -131,6 +131,8 @@ Expect minutes, not seconds: a 4000-line math header is around 700 scalar output
 
 The ranges are not optional. Without knowing what the inputs are, there is no error to bound — for us or for anyone.
 
+**C++ works too**, including templates: the parsing is done by clang, not by us, so `matrix::Vector3f` with inheritance and operator overloading reads as easily as plain C. That also covers anything else LLVM compiles — Rust, Swift. Worked example on real flight-control math: [docs/px4.md](docs/px4.md).
+
 More: [how it works](docs/how-it-works.md) · [run on real libraries](docs/real-projects.md) · [side by side with other tools](docs/comparison.md) · [reproducible defects](docs/witnesses.md)
 
 License: Apache 2.0 with the LLVM exception.
