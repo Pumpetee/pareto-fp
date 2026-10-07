@@ -19,7 +19,7 @@ git clone --depth 1 https://github.com/PX4/PX4-Matrix.git
 python tools/analyse_cpp.py your_file.cpp --range=-1e3..1e3 -I PX4-Matrix
 ```
 
-## Две находки, обе проверены запуском
+## Три находки, все проверены запуском
 
 Не нашей моделью — скомпилированной программой на `-O2`.
 
