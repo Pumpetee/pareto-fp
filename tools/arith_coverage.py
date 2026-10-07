@@ -31,7 +31,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from pareto.cfront import (CParseError, collect_context, constants, functions,
                            globals_of, macro_aliases, make_resolver,
-                           parse_function)
+                           parse_function, struct_result_fields)
 
 SKIP_DIRS = {'.git', 'build', 'cmake', 'tests', 'test', 'examples', 'example',
              'demo', 'demos', 'third_party', 'external', 'extern', 'vendor',
@@ -225,7 +225,10 @@ def main():
     for f in files:
         try:
             src = f.read_text(encoding='utf-8', errors='replace')
-            names = functions(src, types)
+            # table обязателен: без него функции со структурным возвратом
+            # невидимы, и цифра охвата считается по урезанной вселенной. В одном
+            # raymath.h это 109 функций из 146 — вся векторная математика.
+            names = functions(src, types, table)
         except Exception:
             continue
         for name in names:
@@ -234,9 +237,15 @@ def main():
             if not ok:
                 continue
             candidates += 1
+            # Функция, отдающая структуру, принята только если разобрано КАЖДОЕ
+            # её скалярное поле. Считать принятой по одному удавшемуся полю
+            # значило бы записать в успех половину работы.
+            fields = struct_result_fields(src, name, types, table) or [None]
             try:
-                prog = parse_function(src, name, types, table, resolve, macros,
-                                      consts, globs)
+                prog = None
+                for fld in fields:
+                    prog = parse_function(src, name, types, table, resolve,
+                                          macros, consts, globs, field=fld)
                 taken += 1
                 # Самопроверка меры. Текстовая оценка груба, и единственный
                 # способ ей верить — сверять там, где есть с чем сверять: на

@@ -30,7 +30,8 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from pareto.cfront import (collect_context, constants, functions, globals_of,
-                           macro_aliases, make_resolver, parse_function)
+                           macro_aliases, make_resolver, parse_function,
+                           struct_result_fields)
 from pareto.evalfp import eval_float
 from pareto.program import paths
 from pareto.precision import FLOAT32, FLOAT64
@@ -83,7 +84,8 @@ int main(int argc, char **argv) {
     %(decls)s
     %(rettype)s r = %(call)s;
     %(outtype)s out;
-    memcpy(&out, &r, sizeof(out));
+    %(scalar)s v = r%(pick)s;
+    memcpy(&out, &v, sizeof(out));
     printf("%(fmt)s", out);
     return 0;
 }
@@ -135,15 +137,45 @@ def signature(src, name):
     return ret, params
 
 
-def build_case(name, ret, params, args, scalar32, scalar64):
-    """Объявления и вызов для набора плоских имён вроде v.x, v1.y."""
-    # Chipmunk весь написан на cpFloat, а это обычный double. Судить только
-    # float-функции значило бы оставить целый проект без внешнего судьи — то есть
-    # ровно там, где доверие и нужно.
+def width_of(fmt):
+    """Разрядность формата в байтах. Источник истины — сам разбор, а не догадка.
+
+    Раньше разрядность входов выводилась из типа ВОЗВРАТА: для скалярной функции
+    это случайно совпадало, а для функции, отдающей Quaternion, стенд начинал
+    читать поля как double. В C они float, поэтому присваивание округляло их
+    отдельно, и сложение шло уже над округлёнными — а у нас над исходными. Одно
+    лишнее округление на входе, и 39 функций из 74 расходились с компилятором.
+    Поймано побитовой сверкой 07.10.2026.
+    """
+    return 4 if getattr(fmt, 'mant_bits', 53) <= 24 else 8
+
+
+def c_scalar(fmt):
+    return 'float' if width_of(fmt) == 4 else 'double'
+
+
+def build_case(name, ret, params, args, scalar32, scalar64, field=None,
+               field_scalar=None):
+    """Объявления и вызов для набора плоских имён вроде v.x, v1.y.
+
+    Возврат структуры поддержан через выбор поля: функция, отдающая Vector2, это
+    два скалярных выхода, и судить их надо по отдельности. Без этого вся
+    векторная математика осталась бы без внешнего судьи — а это ровно то место,
+    где доверие и нужно.
+    """
+    # Chipmunk весь написан на cpFloat, а это обычный double.
     if ret in scalar32:
         ret_c, reader, width = ret, 'bits_to_f', 4
+        pick, scalar_c = '', ret
     elif ret in scalar64:
         ret_c, reader, width = ret, 'bits_to_d', 8
+        pick, scalar_c = '', ret
+    elif field is not None and field_scalar is not None:
+        ret_c = ret
+        pick = '.' + field
+        scalar_c = field_scalar
+        width = 4 if field_scalar in scalar32 else 8
+        reader = 'bits_to_f' if width == 4 else 'bits_to_d'
     else:
         return None
     bases = {}
@@ -165,21 +197,31 @@ def build_case(name, ret, params, args, scalar32, scalar64):
         # относится к копии, а не к вычислению.
         ptype = ptype.replace('const', '').strip()
         if flats == [pname]:
-            rd = 'bits_to_f' if ptype in scalar32 else 'bits_to_d'
+            w = width_of(args.get(pname))
+            rd = 'bits_to_f' if w == 4 else 'bits_to_d'
             decls.append('{} {} = {}(argv[{}]);'.format(ptype, pname, rd, idx))
-            order.append((pname, 4 if ptype in scalar32 else 8))
+            order.append((pname, w))
             idx += 1
         else:
             decls.append('{} {};'.format(ptype, pname))
-            rd = 'bits_to_f' if ret_c in scalar32 else 'bits_to_d'
-            w = 4 if ret_c in scalar32 else 8
             for flat in sorted(flats):
-                field = flat.split('.', 1)[1]
-                decls.append('{}.{} = {}(argv[{}]);'.format(pname, field, rd, idx))
+                # Разрядность у КАЖДОГО поля своя и берётся из разбора.
+                w = width_of(args.get(flat))
+                rd = 'bits_to_f' if w == 4 else 'bits_to_d'
+                # Имя цикла нарочно не field: параметр с тем же именем выше
+                # означает поле РЕЗУЛЬТАТА, и затенение его здесь уже стоило
+                # падения с IndexError. Плоское имя без точки тоже бывает —
+                # когда объект разобран и как целое, и по полям; стенд для
+                # такого построить нельзя, и мы честно отказываемся.
+                if '.' not in flat:
+                    return None
+                fld_name = flat.split('.', 1)[1]
+                decls.append('{}.{} = {}(argv[{}]);'.format(
+                    pname, fld_name, rd, idx))
                 order.append((flat, w))
                 idx += 1
     call = '{}({})'.format(name, ', '.join(p[1] for p in params))
-    return decls, call, order, ret_c, width
+    return decls, call, order, ret_c, width, pick, scalar_c
 
 
 RELOP = {'<': lambda a, b: a < b, '<=': lambda a, b: a <= b,
@@ -236,9 +278,13 @@ def run_file(target, ctx, a, lo, hi, tmp, inc_args=(), label=''):
     def skip(reason):
         why[reason] = why.get(reason, 0) + 1
 
-    for name in functions(src, ctx['types']):
+    for name in functions(src, ctx['types'], ctx['table']):
+        fields = struct_result_fields(src, name, ctx['types'], ctx['table'])
         try:
-            prog = parse_function(src, name, ctx['types'], ctx['table'], ctx['resolve'], ctx['macros'], ctx['consts'], ctx['globs'])
+            prog = parse_function(src, name, ctx['types'], ctx['table'],
+                                  ctx['resolve'], ctx['macros'], ctx['consts'],
+                                  ctx['globs'],
+                                  field=(fields[0] if fields else None))
         except Exception:
             continue
 
@@ -247,13 +293,19 @@ def run_file(target, ctx, a, lo, hi, tmp, inc_args=(), label=''):
             skipped += 1
             skip('подпись не разобрана')
             continue
+        fld = fields[0] if fields else None
+        fscalar = None
+        if fld is not None:
+            fmt = (ctx['table'].get(ret) or {}).get(fld)
+            fscalar = 'float' if getattr(fmt, 'mant_bits', 24) <= 24 else 'double'
         built = build_case(name, ret, params, prog['args'],
-                           ctx['scalar32'], ctx['scalar64'])
+                           ctx['scalar32'], ctx['scalar64'],
+                           field=fld, field_scalar=fscalar)
         if built is None:
             skipped += 1
             skip('тип возврата или параметра не скалярный')
             continue
-        decls, call, order, ret_c, out_width = built
+        decls, call, order, ret_c, out_width, pick, scalar_c = built
         ps = paths_of(prog)
         if ps is None:
             skipped += 1
@@ -267,6 +319,8 @@ def run_file(target, ctx, a, lo, hi, tmp, inc_args=(), label=''):
             'rettype': ret_c,
             'outtype': 'unsigned int' if out_width == 4 else 'unsigned long long',
             'fmt': '%08x' if out_width == 4 else '%016llx',
+            'pick': pick,
+            'scalar': scalar_c,
         }
         cfile = tmp / (name + '.c')
         exe = tmp / (name + ('.exe' if os.name == 'nt' else ''))

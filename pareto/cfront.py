@@ -33,9 +33,22 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from pareto.precision import FLOAT32, FLOAT64, round_op_for
+from pareto.precision import FLOAT32, FLOAT64, Format, round_op_for
 
 FLOAT_TYPES = {'double': FLOAT64, 'float': FLOAT32, 'long double': FLOAT64}
+
+# Отдельная метка для ЦЕЛОГО литерала. В C `2` это int, и по обычным
+# арифметическим преобразованиям он приводится к типу второго операнда: в
+# `2 * amountPow3`, где amountPow3 это float, всё считается в float. Пока целый
+# литерал носил формат double, такое выражение считалось у нас в двойной
+# точности, то есть мы разбирали не ту программу, что написана. Расхождение
+# нашла побитовая сверка с clang на Vector3CubicHermite из raylib 07.10.2026.
+#
+# Важно не перепутать с `2.0`: это уже double по стандарту, и оно ДЕЙСТВИТЕЛЬНО
+# утягивает выражение в двойную точность. Разница только в записи, и потому
+# решается она на разборе литерала, а не догадкой по значению.
+INT_LITERAL = 'int-literal'
+
 
 # Целые параметры. В вещественной арифметике целое представляется точно, пока
 # |n| < 2^53, и отвергать функцию только за `int count` в сигнатуре — терять её
@@ -120,13 +133,33 @@ class Typed:
 
 def _wrap(tree, fmt):
     """Надеть округление, если результат обязан лежать в узком формате."""
+    if fmt is INT_LITERAL:
+        return tree            # целое значение точно, округлять нечего
     op = round_op_for(fmt)
     return tree if op is None else (op, tree)
 
 
+def _is_zero(value):
+    """Является ли значение буквальным нулём: `{ 0 }` в C обнуляет всю структуру."""
+    tree = value.tree if hasattr(value, 'tree') else value
+    return tree[0] == 'num' and float(tree[1]) == 0.0
+
+
 def _binary(op, a, b):
-    """Обычное арифметическое преобразование C: шире из двух типов, и округление в него."""
-    fmt = FLOAT64 if (a.fmt is FLOAT64 or b.fmt is FLOAT64) else a.fmt
+    """Обычное арифметическое преобразование C: шире из двух типов, и округление в него.
+
+    Целый литерал типа не навязывает: он приводится к типу второго операнда. Если
+    целые с обеих сторон — результат тоже целый, и для нашей арифметики это точное
+    число без округления.
+    """
+    if a.fmt is INT_LITERAL and b.fmt is INT_LITERAL:
+        return Typed((op, a.tree, b.tree), INT_LITERAL)
+    if a.fmt is INT_LITERAL:
+        fmt = b.fmt
+    elif b.fmt is INT_LITERAL:
+        fmt = a.fmt
+    else:
+        fmt = FLOAT64 if (a.fmt is FLOAT64 or b.fmt is FLOAT64) else a.fmt
     return Typed(_wrap((op, a.tree, b.tree), fmt), fmt)
 
 
@@ -167,6 +200,17 @@ class _Parser:
         self.globs = globs or {}
         self.extra_inputs = {}
         self.structs = {}
+        # Локальные переменные структурного типа: имя -> (тип, {поле: внутреннее
+        # имя}). Нужны, чтобы читать `Vector2 result = { a, b }; return result;`
+        # — а это форма, в которой написана вся векторная математика. В одном
+        # raymath.h таких функций 109 из 146, и до сих пор перечислитель их даже
+        # не видел.
+        self.struct_locals = {}
+        # Какое поле результата разбираем. Функция, отдающая Vector2, — это два
+        # скалярных выхода: у каждого своё выражение и своя граница. Так вся
+        # остальная машина остаётся нетронутой: ей по-прежнему приходит одна
+        # скалярная программа.
+        self.want_field = None
         self.opaque = set()
 
     # --- служебное ---
@@ -286,19 +330,22 @@ class _Parser:
 
     def literal(self, tok):
         text = tok.text
-        fmt = FLOAT64
+        fmt = None
         if text[-1] in 'fF':
             text, fmt = text[:-1], FLOAT32
         elif text[-1] in 'lL':
             text = text[:-1]
+            fmt = FLOAT64
+        elif '.' in text or 'e' in text or 'E' in text:
+            fmt = FLOAT64          # `2.0` и `1e3` — double по стандарту
+        else:
+            fmt = INT_LITERAL      # `2` — int, тип ему даёт второй операнд
         try:
             value = float(text)
         except ValueError:
             raise CParseError('cannot read the number {!r}'.format(tok.text), tok.line)
         if fmt is FLOAT32:
             value = FLOAT32.round(value)
-        # Целочисленный литерал в вещественном выражении сам по себе точен, а тип
-        # ему даёт контекст; для нашей арифметики это просто число.
         return Typed(('num', value), fmt)
 
     def skip_statement(self):
@@ -664,6 +711,14 @@ class _Parser:
                               'trip count'.format(tok.text), tok.line)
         if tok.kind == 'name' and self.peek(1).text in ('=', '+=', '-=', '*=', '/='):
             return self.assignment()
+        if tok.kind == 'name' and tok.text in self.struct_locals:
+            got = self.struct_field_assignment()
+            if got is not None:
+                return got
+        if tok.kind == 'name' and tok.text in self.structs:
+            got = self.struct_local_init()
+            if got is not None:
+                return got
         if tok.text == '{':
             return self.block()
         if tok.kind == 'name' and (tok.text in self.structs
@@ -756,6 +811,102 @@ class _Parser:
         self.vars[name] = (inner, fmt)
         return out
 
+    def struct_local_init(self):
+        """`Vector2 result = { e1, e2 };` — структурная локальная с фигурным списком.
+
+        Поля привязываются ПО ПОРЯДКУ объявления в структуре, как и требует C.
+        Короткий список допустим: `{ 0 }` в C обнуляет всё остальное, и именно так
+        написан Vector2Normalize в raylib.
+
+        Отказ возвращается как False без потребления лексем, чтобы разбор мог
+        попробовать другие правила: эта же форма начинается так же, как
+        объявление непрозрачного локального объекта.
+        """
+        start = self.i
+        tname = self.take().text
+        if tname not in self.structs or self.peek().kind != 'name':
+            self.i = start
+            return None
+        vname = self.take().text
+        if not self.at('='):
+            self.i = start
+            return None
+        self.take('=')
+        if not self.at('{'):
+            self.i = start
+            return None
+        self.take('{')
+        values = []
+        if not self.at('}'):
+            while True:
+                values.append(self.expr())
+                if self.at(','):
+                    self.take(',')
+                    if self.at('}'):
+                        break          # висячая запятая законна
+                    continue
+                break
+        self.take('}')
+        self.take(';')
+
+        fields = self.structs[tname]
+        out, slots = [], {}
+        for idx, (fname, fmt) in enumerate(fields.items()):
+            if not isinstance(fmt, Format):
+                continue               # вложенная структура: пока не раскрываем
+            if idx < len(values):
+                val = values[idx]
+            elif values and len(values) == 1 and _is_zero(values[0]):
+                val = values[0]        # `{ 0 }` обнуляет всё
+            elif values:
+                val = Typed(('num', 0.0), fmt)
+            else:
+                val = Typed(('num', 0.0), fmt)
+            tree = val.tree if val.fmt is fmt else _wrap(val.tree, fmt)
+            inner = self.fresh(vname + '.' + fname)
+            out.append(('let', inner, tree))
+            slots[fname] = (inner, fmt)
+        self.struct_locals[vname] = (tname, slots)
+        for fname, (inner, fmt) in slots.items():
+            self.vars[vname + '.' + fname] = (inner, fmt)
+        return out
+
+    def struct_field_assignment(self):
+        """`result.x = expr;` — присваивание полю структурной локальной."""
+        start = self.i
+        vname = self.take().text
+        if vname not in self.struct_locals or not self.at('.'):
+            self.i = start
+            return None
+        self.take('.')
+        if self.peek().kind != 'name':
+            self.i = start
+            return None
+        fname = self.take().text
+        if self.peek().text not in ('=', '+=', '-=', '*=', '/='):
+            self.i = start
+            return None
+        tname, slots = self.struct_locals[vname]
+        if fname not in slots:
+            self.i = start
+            return None
+        old, fmt = slots[fname]
+        op = self.take().text
+        if op == '=' and self.ternary_question() is not None:
+            key = vname + '.' + fname
+            out = self.ternary_let(key, fmt, self.peek().line)
+            slots[fname] = self.vars[key]
+            return out
+        value = self.expr()
+        self.take(';')
+        if op != '=':
+            value = _binary(op[0], Typed(('var', old), fmt), value)
+        tree = value.tree if value.fmt is fmt else _wrap(value.tree, fmt)
+        inner = self.fresh(vname + '.' + fname)
+        slots[fname] = (inner, fmt)
+        self.vars[vname + '.' + fname] = (inner, fmt)
+        return [('let', inner, tree)]
+
     def assignment(self):
         name_tok = self.take()
         name = name_tok.text
@@ -841,6 +992,18 @@ class _Parser:
                 out = self.return_expr()
                 self.take(')')
                 return out
+        # `return result;` где result — структурная локальная: отдаём выражение
+        # нужного поля. Какое именно поле нужно, разборщику сказали заранее.
+        if (self.want_field and self.peek().kind == 'name'
+                and self.peek().text in self.struct_locals
+                and self.peek(1).text == ';'):
+            vname = self.take().text
+            _tname, slots = self.struct_locals[vname]
+            if self.want_field not in slots:
+                raise CParseError('{} has no field {!r}'.format(
+                    vname, self.want_field), self.peek().line)
+            inner, fmt = slots[self.want_field]
+            return [('return', Typed(('var', inner), fmt))]
         if self.ternary_question() is None:
             return [('return', self.expr())]
         cond = self.condition()
@@ -1142,6 +1305,45 @@ def _signature_re(types):
 
 
 _SIGNATURE = _signature_re(FLOAT_TYPES)
+
+def _any_signature_re(types, table):
+    """Сигнатура функции, возвращающей скаляр ИЛИ структуру.
+
+    Пока перечислитель знал только скалярные возвраты, вся векторная математика
+    была для нас невидима — и, что хуже, не попадала даже в число отвергнутых.
+    Цифра охвата считалась по урезанной вселенной: в raymath.h 109 функций из 146
+    возвращают Vector2, Matrix или Quaternion.
+    """
+    names = sorted(set(types) | set(table), key=len, reverse=True)
+    if not names:
+        return None
+    alt = "|".join(re.escape(n).replace(r"\ ", r"\s+") for n in names)
+    return re.compile(r"\b(" + alt + r")\s+([A-Za-z_][A-Za-z_0-9]*)\s*\(([^)]*)\)\s*\{")
+
+
+def struct_result_fields(src, name, types=None, table=None):
+    """Поля результата функции, если она возвращает структуру. Иначе пустой список.
+
+    Нужно, чтобы вызывающая сторона знала, сколько скалярных выходов разбирать:
+    одна функция, отдающая Vector3, — это три отдельные программы с тремя
+    отдельными границами.
+    """
+    types = types or scalar_types(src)
+    table = dict(table or {})
+    table.update(structs(src, types))
+    rx = _any_signature_re(types, table)
+    if rx is None:
+        return []
+    for m in rx.finditer(src):
+        if m.group(2) != name:
+            continue
+        tname = " ".join(m.group(1).split())
+        if tname in types:
+            return []
+        fields = table.get(tname) or {}
+        return [f for f, fmt in fields.items() if isinstance(fmt, Format)]
+    return []
+
 
 
 _STRUCT = re.compile(
@@ -1508,13 +1710,24 @@ def structs(src, types=None):
     return out
 
 
-def functions(src, types=None):
-    """Имена вещественных функций файла — чтобы можно было выбрать нужную."""
-    return [m.group(2) for m in _signature_re(types or scalar_types(src)).finditer(src)]
+def functions(src, types=None, table=None):
+    """Имена вещественных функций файла — чтобы можно было выбрать нужную.
+
+    Со структурным возвратом тоже: `Vector2 Vector2Add(...)` это такая же
+    вещественная функция, просто у неё два скалярных выхода вместо одного.
+    Передайте table, иначе структурные возвраты останутся невидимыми — ровно
+    как было до 07.10.2026.
+    """
+    types = types or scalar_types(src)
+    if table:
+        rx = _any_signature_re(types, table)
+        if rx is not None:
+            return [m.group(2) for m in rx.finditer(src)]
+    return [m.group(2) for m in _signature_re(types).finditer(src)]
 
 
 def parse_function(src, name=None, types=None, table=None, resolve=None,
-                   macros=None, consts=None, globs=None):
+                   macros=None, consts=None, globs=None, field=None):
     """Разобрать одну функцию файла в программу.
 
     Возвращает словарь: имя, формат результата, аргументы (имя -> формат),
@@ -1525,7 +1738,8 @@ def parse_function(src, name=None, types=None, table=None, resolve=None,
     types = types or scalar_types(src)
     table = dict(table or {})
     table.update(structs(src, types))
-    matches = list(_signature_re(types).finditer(src))
+    rx = _any_signature_re(types, table) or _signature_re(types)
+    matches = list(rx.finditer(src))
     if not matches:
         raise CParseError('no function returning double or float found in the file')
     chosen = None
@@ -1537,7 +1751,29 @@ def parse_function(src, name=None, types=None, table=None, resolve=None,
         raise CParseError('function {!r} not found. The file defines: {}'.format(
             name, ', '.join(m.group(2) for m in matches)))
 
-    ret_fmt = types[" ".join(chosen.group(1).split())]
+    ret_tname = " ".join(chosen.group(1).split())
+    want_field = None
+    if ret_tname in types:
+        ret_fmt = types[ret_tname]
+    else:
+        # Возврат структуры. Разбираем ОДНО поле: у каждого своё выражение и своя
+        # граница, а вся остальная машина продолжает получать скалярную
+        # программу. Поле обязательно указать явно — угадывать «наверное, первое»
+        # значило бы молча посчитать не то, что спросили.
+        fields = {f: fm for f, fm in (table.get(ret_tname) or {}).items()
+                  if isinstance(fm, Format)}
+        if not fields:
+            raise CParseError('function {} returns {}, and its scalar fields are '
+                              'unknown here'.format(chosen.group(2), ret_tname))
+        if field is None:
+            raise CParseError(
+                'function {} returns {}: specify which field to analyse, one of {}'
+                .format(chosen.group(2), ret_tname, ', '.join(fields)))
+        if field not in fields:
+            raise CParseError('{} has no scalar field {!r}; it has {}'.format(
+                ret_tname, field, ', '.join(fields)))
+        ret_fmt = fields[field]
+        want_field = field
     fname = chosen.group(2)
     params = chosen.group(3).strip()
     line0 = src.count('\n', 0, chosen.start()) + 1
@@ -1620,6 +1856,7 @@ def parse_function(src, name=None, types=None, table=None, resolve=None,
     toks = tokenize(body)
     p = _Parser(toks, resolve=resolve, macros=macros, consts=consts,
                 globs=globs, float_types=types)
+    p.want_field = want_field
     p.structs = table
     p.opaque = opaque
     for a in order:

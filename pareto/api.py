@@ -348,7 +348,7 @@ def safety_envelope(tree, dom, limit=None, steps=40, floor=1e-300):
 
 
 def analyse_c_function(src, name=None, dom=None, keep=8, iters=8, refine=True,
-                       optimise=True, max_boxes=32, ctx=None):
+                       optimise=True, max_boxes=32, ctx=None, field=None):
     """Разбор функции на C: пути, границы, переписанные ветки.
 
     Каждый путь исполнения оптимизируется САМ: у ветвей разная арифметика и разные
@@ -362,7 +362,7 @@ def analyse_c_function(src, name=None, dom=None, keep=8, iters=8, refine=True,
     c = ctx or {}
     fn = parse_function(src, name, c.get('types'), c.get('table'),
                         c.get('resolve'), c.get('macros'), c.get('consts'),
-                        c.get('globs'))
+                        c.get('globs'), field=field)
     domain = dict(fn['domains'])
     if dom:
         domain.update(dom)
