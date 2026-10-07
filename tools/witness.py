@@ -28,7 +28,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from pareto.api import analyse_c_function
 from pareto.cfront import (collect_context, constants, functions, globals_of,
-                           macro_aliases, make_resolver, parse_function)
+                           macro_aliases, make_resolver, parse_function,
+                           struct_result_fields)
 from pareto.codegen import to_c
 from pareto.evalfp import eval_float
 from pareto.exactref import exact_stable
@@ -257,15 +258,22 @@ def main():
     for target in targets:
         try:
             src = target.read_text(encoding='utf-8', errors='replace')
-            names = functions(src, types)
+            # table обязателен: иначе функции со структурным возвратом невидимы,
+            # а это вся векторная математика — ровно там, где и живёт болезнь
+            # sqrt от суммы квадратов.
+            names = functions(src, types, table)
         except Exception:
             continue
         if a.function:
             names = [n for n in names if n == a.function]
+        jobs = []
         for name in names:
+            for fld in (struct_result_fields(src, name, types, table) or [None]):
+                jobs.append((name, fld))
+        for name, fld in jobs:
             try:
                 prog = parse_function(src, name, types, table, resolve, macros,
-                                      consts, globs)
+                                      consts, globs, field=fld)
             except Exception:
                 continue
             if len(prog['stmts']) and any(st[0] not in ('let', 'return')
@@ -273,7 +281,7 @@ def main():
                 continue
             dom = {arg: (lo, hi) for arg in prog['args']}
             try:
-                res = analyse_c_function(src, name, dom=dom, ctx=ctx)
+                res = analyse_c_function(src, name, dom=dom, ctx=ctx, field=fld)
             except Exception:
                 continue
             paths = res.get('paths') or []
@@ -285,6 +293,8 @@ def main():
             got = hunt(w, r, dom, a.cases, rng)
             if got is None or got[0] < a.min_digits:
                 continue
+            if fld is not None:
+                name = '{}.{}'.format(name, fld)
             # Разрядность берём из объявленного типа возврата: у raylib и box2d
             # это float32, у Chipmunk — double, и справочный предел цифр у них
             # разный. Ставить четвёрку всем было бы небрежностью ровно того рода,

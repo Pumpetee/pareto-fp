@@ -22,7 +22,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from pareto.api import analyse_c_function, domain_hazards
 from pareto.cfront import (CParseError, collect_context, constants, functions,
                            globals_of, macro_aliases, make_resolver,
-                           parse_function)
+                           parse_function, struct_result_fields)
 
 ARITH = {'+', '-', '*', '/', 'fma', 'sqrt', 'exp', 'log', 'expm1', 'log1p',
          'sin', 'cos', 'atan', 'atan2', 'hypot', 'neg'}
@@ -111,14 +111,19 @@ def main():
     for f in files:
         try:
             src = f.read_text(encoding='utf-8', errors='replace')
-            names = functions(src, types)
+            # table обязателен: без него функции со структурным возвратом
+            # невидимы, и охват считается по урезанной вселенной.
+            names = functions(src, types, table)
         except Exception:
             continue
         for name in names:
             seen += 1
+            flds = struct_result_fields(src, name, types, table) or [None]
             try:
-                prog = parse_function(src, name, types, table, resolve, macros,
-                                      consts, globs)
+                prog = None
+                for _f in flds:
+                    prog = parse_function(src, name, types, table, resolve,
+                                          macros, consts, globs, field=_f)
             except CParseError as e:
                 key = str(e).split(':')[-1].strip()[:50]
                 refusals[key] = refusals.get(key, 0) + 1
@@ -132,7 +137,8 @@ def main():
                 continue
             dom = {arg: (lo, hi) for arg in prog['args']}
             try:
-                res = analyse_c_function(src, name, dom=dom, ctx=ctx)
+                res = analyse_c_function(src, name, dom=dom, ctx=ctx,
+                                         field=flds[0])
             except Exception:
                 continue
             base, best = res.get('base_bound'), res.get('best_bound')
@@ -144,7 +150,8 @@ def main():
             if (base and best and math.isfinite(base) and math.isfinite(best)
                     and best > 0):
                 gain = base / best
-            rows.append((name, f.relative_to(root), base, best, gain))
+            label = name if flds[0] is None else '{}.{}'.format(name, flds[0])
+            rows.append((label, f.relative_to(root), base, best, gain))
             tree = single_expr(prog)
             if tree is not None:
                 try:

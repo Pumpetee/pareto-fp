@@ -163,8 +163,18 @@ def _binary(op, a, b):
     return Typed(_wrap((op, a.tree, b.tree), fmt), fmt)
 
 
+# К диагностике отнесены и явные пустышки: B2_UNUSED(x) разворачивается в
+# `(void)x` и на вычисление не влияет вовсе. Проверки входа вроде
+# B2_CHECK_INPUT_RETURN — другое дело: при нарушении условия функция выходит
+# раньше. Пропуская их, мы разбираем ПУТЬ, НА КОТОРОМ ПРЕДУСЛОВИЕ ВЫПОЛНЕНО, и
+# это осознанное допущение, а не недосмотр: именно для такого пути человек и
+# спрашивает границу. Список узкий и признан узким.
 _DIAGNOSTIC = re.compile(
-    r"assert|abort|log|trace|print|warn|error|fatal|debug|check\b", re.I)
+    # `check` с границей слова не ловил B2_CHECK_INPUT_RETURN: подчёркивание
+    # тоже буква. Допускаем и подчёркивание следом, но не произвольное
+    # продолжение — чтобы checksum не был принят за диагностику.
+    r"assert|abort|log|trace|print|warn|error|fatal|debug|check(?:\b|_)"
+    r"|unused|unref|ignore", re.I)
 
 
 def _is_diagnostic(name):
@@ -2245,6 +2255,20 @@ def body_span(src, brace_pos):
     n = len(src)
     while i < n:
         c = src[i]
+        # Комментарии пропускаются целиком. Без этого апостроф в обычной
+        # английской фразе — `// Put the ray into the edge's frame` — принимался
+        # за открытие символьного литерала и съедал полтела функции вместе с
+        # настоящей закрывающей скобкой. Четыре функции box2d отвергались
+        # сообщением «тело без закрывающей скобки», и причина выглядела как
+        # неразбираемый код, хотя код был безупречен.
+        if c == '/' and i + 1 < n and src[i + 1] == '/':
+            j = src.find(chr(10), i)
+            i = n if j < 0 else j + 1
+            continue
+        if c == '/' and i + 1 < n and src[i + 1] == '*':
+            j = src.find('*/', i + 2)
+            i = n if j < 0 else j + 2
+            continue
         if c == '{':
             depth += 1
         elif c == '}':
