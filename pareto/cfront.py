@@ -616,6 +616,16 @@ class _Parser:
         if tok.text == ';':
             self.take(';')
             return []
+        if tok.kind == 'name' and tok.text in ('const', 'volatile', 'register'):
+            # `const float ratio = ...;` — объявление с квалификатором. На
+            # вычисление квалификатор не влияет никак: это обещание не менять
+            # переменную, а не иное поведение арифметики. Раньше такая строка
+            # отвергала функцию целиком.
+            nxt = self.peek(1)
+            if nxt.kind == 'name' and (nxt.text in self.float_types
+                                       or nxt.text in INT_TYPES):
+                self.take()
+                return self.statement()
         if tok.kind == 'name' and tok.text in self.float_types:
             return self.declaration()
         if tok.kind == 'name' and tok.text in ('int', 'long', 'short', 'unsigned', 'char',
@@ -693,6 +703,10 @@ class _Parser:
                                   name_tok.line)
             if self.at('='):
                 self.take('=')
+                if self.ternary_question() is not None:
+                    out.extend(self.ternary_let(name_tok.text, fmt,
+                                                name_tok.line))
+                    return out
                 value = self.expr()
                 tree = value.tree if value.fmt is fmt else _wrap(value.tree, fmt)
                 inner = self.fresh(name_tok.text)
@@ -708,6 +722,40 @@ class _Parser:
             self.take(';')
             return out
 
+    def ternary_let(self, name, fmt, line):
+        """`name = cond ? a : b;` — понижение до ветвления с присваиванием в ветках.
+
+        Это самый частый идиом в живом коде, и до сих пор он отвергал функцию
+        целиком: `invMag = mag > 0.0f ? 1.0f / mag : 0.0f;` в b2Normalize, и
+        подобное в raylib.
+
+        Понижение работает потому, что представление программы уже умеет хвост за
+        ветвлением: `paths` при разборе `if` приписывает остаток операторов в
+        обе ветви и выдаёт по пути на каждую. То есть управление «сходится
+        обратно» только на вид — каждый путь остаётся прямолинейным, и никакого
+        слияния значений не требуется.
+
+        Единственная тонкость: внутреннее имя переменной должно быть ОДНО на обе
+        ветви, иначе дальнейший код сослался бы на имя из одной из них. Поэтому
+        свежее имя выдаётся здесь один раз, до разбора ветвей.
+        """
+        inner = self.fresh(name)
+        cond = self.condition()
+        self.take('?')
+        then_val = self.expr()
+        self.take(':')
+        else_val = self.expr()
+        self.take(';')
+
+        def wrap(value):
+            return value.tree if value.fmt is fmt else _wrap(value.tree, fmt)
+
+        out = _lower_cond(cond,
+                          [('let', inner, wrap(then_val))],
+                          [('let', inner, wrap(else_val))])
+        self.vars[name] = (inner, fmt)
+        return out
+
     def assignment(self):
         name_tok = self.take()
         name = name_tok.text
@@ -715,6 +763,8 @@ class _Parser:
             raise CParseError('assignment to unknown name {!r}'.format(name), name_tok.line)
         old, fmt = self.vars[name]
         op = self.take().text
+        if op == '=' and self.ternary_question() is not None:
+            return self.ternary_let(name, fmt, name_tok.line)
         value = self.expr()
         self.take(';')
         if op != '=':
@@ -805,14 +855,55 @@ class _Parser:
         self.take('(')
         cond = self.condition()
         self.take(')')
+
+        # Ветви разбираются каждая со СВОЕЙ копией таблицы имён, а потом имена
+        # сводятся. Раньше здесь стояло требование «каждая ветвь обязана
+        # закончиться возвратом»: мол, иначе управление сходится обратно, и
+        # переменная имеет разное значение в разных ветках.
+        #
+        # Требование оказалось лишним, и обнаружил это внешний судья. В raylib
+        # написано `if (result > max) result = max;` — ветвь без else. Наш
+        # разборщик давал переменной новое внутреннее имя внутри ветви, и на
+        # пути «условие ложно» это имя не существовало: сравнение с clang
+        # упало с KeyError на функции Clamp.
+        #
+        # Слияние выражается — потому что представление программы уже умеет
+        # хвост за ветвлением: `paths` приписывает остаток операторов в обе
+        # ветви. То есть каждый путь остаётся прямолинейным, и достаточно
+        # сделать так, чтобы ОБЕ ветви заканчивались одним и тем же внутренним
+        # именем. Ветвь, которая переменную не меняла, получает явное
+        # присваивание прежнего значения.
+        before = dict(self.vars)
+
+        self.vars = dict(before)
         then_part = self.block()
+        after_then = dict(self.vars)
+
+        self.vars = dict(before)
         else_part = []
         if self.at('else'):
             self.take('else')
             else_part = self.block()
-        # Каждая ветвь обязана закончиться возвратом. Иначе управление сходится
-        # обратно, и после схождения переменная имеет разное значение в разных
-        # ветках — это уже не путь, а слияние, и подстановкой оно не выражается.
+        after_else = dict(self.vars)
+
+        merged = dict(before)
+        for name in set(after_then) | set(after_else):
+            t = after_then.get(name)
+            e = after_else.get(name)
+            if t == e:
+                if t is not None:
+                    merged[name] = t
+                continue
+            if t is None or e is None:
+                # Переменная объявлена внутри одной ветви: за пределами
+                # ветвления её нет, и выносить её наружу нельзя.
+                continue
+            fmt = t[1]
+            inner = self.fresh(name)
+            then_part = list(then_part) + [('let', inner, ('var', t[0]))]
+            else_part = list(else_part) + [('let', inner, ('var', e[0]))]
+            merged[name] = (inner, fmt)
+        self.vars = merged
         return _lower_cond(cond, then_part, else_part)
 
     def for_statement(self):
@@ -1302,9 +1393,13 @@ def _expand(table, tname, prefix, out, depth=0):
             out[key] = fmt
 
 
+# Логические поля идут сюда же: `bool` это 0 или 1, величина точная, и
+# отвергать функцию из-за `joint->enableSpring` значит терять её на флаге.
+# Псевдонимы вроде b2Bool и cpBool тоже встречаются, поэтому имя допускается
+# любое, оканчивающееся на bool или Bool.
 _INT_FIELD = re.compile(
     r"\b(?:unsigned\s+|signed\s+)?(int|long|short|char|size_t|ptrdiff_t|"
-    r"u?int(?:8|16|32|64)_t)\s+([^;\{\}]+);")
+    r"u?int(?:8|16|32|64)_t|_Bool|[A-Za-z_]\w*[bB]ool)\s+([^;\{\}]+);")
 
 
 def _field_re(types):

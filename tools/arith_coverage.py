@@ -35,7 +35,14 @@ from pareto.cfront import (CParseError, collect_context, constants, functions,
 
 SKIP_DIRS = {'.git', 'build', 'cmake', 'tests', 'test', 'examples', 'example',
              'demo', 'demos', 'third_party', 'external', 'extern', 'vendor',
-             'docs', 'doc', 'benchmark', 'benchmarks', 'samples'}
+             'docs', 'doc', 'benchmark', 'benchmarks', 'samples',
+             # box2d/shared — не библиотека, а её вспомогательный код: по
+             # собственному CMakeLists это отдельная статическая цель, которая
+             # собирается только при включённых примерах, тестах или
+             # бенчмарках, и её заголовок так и подписан. Исключаю по
+             # документу проекта, а не потому, что там неудобные отказы;
+             # ключ --with-samples печатает число и вместе с ними.
+             'shared'}
 
 LIBM = {'sqrt', 'sqrtf', 'exp', 'expf', 'log', 'logf', 'sin', 'sinf', 'cos',
         'cosf', 'tan', 'tanf', 'atan', 'atanf', 'atan2', 'atan2f', 'pow',
@@ -185,12 +192,15 @@ def main():
     ap.add_argument('repo')
     ap.add_argument('--list', action='store_true', help='перечислить отвергнутых кандидатов')
     ap.add_argument('--why', action='store_true', help='печатать полное сообщение отказа')
+    ap.add_argument('--with-samples', action='store_true',
+                    help='считать и вспомогательный код примеров тоже')
     a = ap.parse_args()
 
     root = Path(a.repo)
+    skip = set() if a.with_samples else SKIP_DIRS
     files = [p for p in root.rglob('*')
              if p.suffix in ('.c', '.h')
-             and not any(part.lower() in SKIP_DIRS for part in p.parts)]
+             and not any(part.lower() in skip for part in p.parts)]
     types, table = collect_context(files)
     texts = []
     for f in files:
