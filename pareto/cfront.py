@@ -373,6 +373,58 @@ class _Parser:
                 return
             self.take()
 
+    def opaque_struct_local(self):
+        """Локальная структура, полученная от того, чего мы не разбираем.
+
+        Для УКАЗАТЕЛЯ на непрозрачный объект это правило уже действует: поля
+        честно считаются неизвестными входами с обязательным диапазоном. Для
+        структуры ПО ЗНАЧЕНИЮ его не было, и разбор падал на `qA.c` сообщением
+        «неизвестное имя» — хотя случай тот же самый: значение пришло оттуда, где
+        мы ничего не моделируем, а поля участвуют в расчёте.
+
+        Это загрубление в безопасную сторону: границу оно может только расширить,
+        потому что связь между полями и настоящими входами теряется. Цена честная
+        и названная — зато диапазон для таких полей человек обязан указать, иначе
+        разбор не пойдёт.
+
+        Инициализатор пропускается целиком: вычислить его мы не можем, а делать
+        вид, что можем, значит посчитать границу для другой программы.
+        """
+        start = self.i
+        tname = self.take().text
+        while tname in ('struct', 'union', 'const', 'static', 'volatile'):
+            if self.peek().kind != 'name':
+                self.i = start
+                return None
+            tname = self.take().text
+        if tname not in self.structs or self.peek().kind != 'name':
+            self.i = start
+            return None
+        vname = self.take().text
+        if self.at('['):
+            self.i = start
+            return None            # массив — отдельный случай, здесь отказ
+        if not self.at('='):
+            self.i = start
+            return None
+        self.take('=')
+        self.skip_statement()
+
+        fields = [(f, fm) for f, fm in self.structs[tname].items()
+                  if isinstance(fm, Format)]
+        if not fields:
+            self.i = start
+            return None
+        slots = {}
+        for fname, fmt in fields:
+            key = vname + '.' + fname
+            self.vars[key] = (key, fmt)
+            self.extra_inputs[key] = fmt
+            slots[fname] = (key, fmt)
+        self.struct_locals[vname] = (tname, slots)
+        self.opaque.add(vname)
+        return []
+
     def opaque_local(self):
         """Локальный объект, полученный откуда-то, чего мы не разбираем.
 
@@ -737,6 +789,9 @@ class _Parser:
             if got is not None:
                 return got
             got = self.struct_copy_init()
+            if got is not None:
+                return got
+            got = self.opaque_struct_local()
             if got is not None:
                 return got
         if tok.text == '{':
