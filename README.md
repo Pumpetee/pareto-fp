@@ -1,233 +1,126 @@
 # pareto-fp
 
-Takes a floating-point expression, or a whole function out of a C file, and rewrites it into an equivalent one that is more accurate, often faster, and comes with a **proven upper bound on the error**. It writes the result back into your file, and it will tell you with its exit code whether your error requirement holds — so it can sit in a build and not only in a terminal.
+**It finds places where your program quietly returns a wrong number, and it proves how wrong the number can get.**
 
-Today a compiler gives you two options: keep the exact order of operations and stay slow, or turn on `-ffast-math` and get speed with no guarantees at all. There is nothing in between. This tool builds the Pareto front over *cost* and *provable error bound*, and lets you pick a point on it.
+Not "probably wrong". Not "wrong in our tests". A proven upper bound: the error cannot exceed this value for any input in the range you give.
 
-```
-$ pareto-fp "x*x - y*y" --domain x=1000..1000.001 --domain y=999.999..1000
+[Та же страница по-русски](README.ru.md)
 
-input expression: ((x * x) - (y * y))
-model cost: 5.0 | proven error bound: 1.164e-10
+---
 
-Pareto front (every non-dominated form):
-     cost        bound  form
-      5.0    4.494e-16  ((y + x) * (x - y))
-      9.8    3.331e-16  fma(x, (x - y), ((x - y) * y))
+## The thing it finds, in one example
 
-cheapest form   : ((y + x) * (x - y))
-                  1.00x cheaper, error bound 4.494e-16
-most accurate   : ((y + x) * (x - y))
-                  bound 2.59e+05x smaller, costs 1.00x
-
-paste into code : ((y + x) * (x - y))
-```
-
-The ranges matter as much as the expression. On `x, y ∈ [1, 2]` this same rewrite buys nothing: the bound stays around 1e-15 either way, because absolute rounding error does not care about cancellation when the operands are far apart. The gain above comes from `x` and `y` being close, which is exactly when the difference of squares destroys significant digits.
-
-## Install and run
-
-**No installation.** Download `pareto-fp.pyz` from [Releases](https://github.com/Pumpetee/pareto-fp/releases) and run it with any Python 3.10 or newer:
-
-```
-python pareto-fp.pyz "sqrt(x+1) - sqrt(x)" --domain x=1e6..1e9
-```
-
-**No Python either.** The same release page has standalone binaries for Linux, macOS and Windows — one file, nothing to install.
-
-**From source**, no dependencies:
-
-```
-git clone https://github.com/Pumpetee/pareto-fp && cd pareto-fp
-python -m pareto.cli "sqrt(x+1) - sqrt(x)" --domain x=1e6..1e9
-```
-
-Ranges are mandatory: without knowing the inputs there is no error bound to prove.
-
-## On your own file
-
-Point it at a C file instead of typing the expression out:
-
-```
-$ pareto-fp --file examples/branch_sqrt.c --function safe_diff_sqrt
-
-function        : safe_diff_sqrt -> float64
-input ranges    : x in [0, 1e+09]
-execution paths : 2 (32 boxes used to decide the conditions)
-
-path       as written    rewritten  condition
-T           4.926e-12    1.176e-16  x > 1
-F           3.006e-16    3.006e-16  x > 1   (false)
-
-proven bound as written : 4.926e-12
-proven bound rewritten  : 3.006e-16
-  improvement           : 1.64e+04x tighter
-
-rewritten body:
-    if ((x) > (1.0)) {
-        return (1.0 / (sqrt(x) + sqrt((x + 1.0))));
-    }
-    return (sqrt((x + 1.0)) - sqrt(x));
-```
-
-Ranges live in a comment next to the function, because they are part of its contract:
+This is real code from [raylib](https://github.com/raysan5/raylib), a popular game library. It measures the length of a vector:
 
 ```c
-// @domain x: 0.0 .. 1000000000.0
-double safe_diff_sqrt(double x) { ... }
+float Vector2Length(Vector2 v)
+{
+    return sqrtf((v.x*v.x) + (v.y*v.y));
+}
 ```
 
-`--list` shows the functions and the ranges it found. `--domain x=1..2` overrides them.
+It looks correct. It is the formula from school. Compile it and run it:
 
-Each execution path is analysed and rewritten **on its own**: the arithmetic that is best on `x > 1` is not the arithmetic that is best below it, which is exactly why a compiler specialises inside a branch.
-
-### Conditionals are where a bound can quietly become a lie
-
-A comparison is decided on the **computed** values, and those carry rounding error. Near the boundary the program can take the other branch, and then the error against the ideal value is not rounding at all — it is the whole **jump** between the branches. A tool that takes the maximum over the branches and prints it is wrong on exactly the inputs that matter.
-
-So the bound is reported in two parts:
-
-```
-proven bound as written : 1.000e+00
-  of which rounding     : 3.331e-16 as written, 2.220e-16 rewritten
-  of which branch jump  : 1.000e+00
-```
-
-When the branches meet at the boundary the jump term is zero and does not appear. When they do not, no rewriting of the arithmetic will help, and saying so is more useful than a pretty number.
-
-### Mixed precision, read out of the declarations
-
-Types are followed by the rules of C, not guessed. In `float a, b; a*b` the multiply happens in binary32; in `a*2.0` it happens in binary64, because the literal is a double; assigning into a `float` rounds, and so does returning from a `float` function. All of that changes the bound.
-
-```
-$ pareto-fp --file examples/mixed_precision.c --function energy
-proven bound as written : 3.912e-04
-proven bound rewritten  : 1.221e-04      3.21x tighter
-rewritten body:
-    return (float)(fma((h * 9.8100004196167), m, ((0.5 * v) * (m * v))));
-```
-
-That is the oldest fix in numerical code — keep the intermediates wide, round once at the end — except here you get the factor it bought you, proven rather than hoped for.
-
-The question in the other direction has its own flag. `--target` asks for the **narrowest formats whose proven bound still stays under a value you choose**:
-
-```
-$ pareto-fp "0.5*m*v*v + m*9.81*h" --domain m=1..2 --domain v=0..30 --domain h=0..100 --target 1e-3
-
-Precision:
-    format        bound  note
-   float64    1.164e-13  every operation in this format
-   float32    6.256e-05  every operation in this format
-   float16    3.223e-02  every operation in this format
-
-narrowest mix that still meets 1.000e-03: bound 6.256e-05, 6 subexpression(s) narrowed
-```
-
-Tools that tune precision usually decide by running a sample of inputs. Here the check is a proven bound over the whole range, so the answer is never "it was good enough on my tests".
-
-What the tool does **not** claim: that narrow precision is faster. On scalar x86 `mulss` and `mulsd` have the same latency; the win of `float` lives in memory traffic and vector width, and the cost model measures neither. So the front never picks `float` "for speed", and the precision question is answered by the bound instead.
-
-### Loops
-
-A loop with a known trip count is unrolled and then analysed as straight-line code. Unrolling is the only sound way this method knows to handle a loop, so the trip count has to be constant — a loop bounded by a variable is refused out loud rather than guessed at. Array reductions are a separate mode with bounds from Higham (`pareto/reductions.py`).
-
-### Writing the result back
-
-A tool that prints the better form and leaves you to retype it is a report, not something you use. `-o` writes the file out with the body of that one function replaced:
-
-```
-$ pareto-fp --file kernel.c --function safe_diff_sqrt -o kernel_fast.c
-note: added #include <math.h>, the file had none and the body calls sqrt.
-      Harmless if the header already arrives through another include
-wrote kernel_fast.c with the body of safe_diff_sqrt rewritten; the rest of the file is unchanged
-```
-
-Only the bytes between `{` and its matching `}` change. The signature is left alone, so callers do not move; comments, includes, neighbouring functions and line endings come through unchanged. `--diff` prints the change as a unified diff instead, `-o -` writes to stdout, and giving the input path as the output rewrites in place.
-
-The file it hands you has to compile, and that is checked by a compiler rather than assumed: CI rewrites every example and builds the result. The first version of this did not survive that check. It added `#include <math.h>` only when the rewrite introduced a call the original body did not have, so a file that already called `sqrt` without the header came out as broken as it went in — and it looked like the tool was broken, not the file.
-
-### Checking a requirement in your build
-
-`--require` turns the report into a check. One question — does the error provably stay under this value — answered with the exit code, so a build or a pre-commit hook can act on it without parsing anything:
-
-```
-$ pareto-fp --file examples/rosa_turbine.c --function turbine1 --require 1.5e-14 ; echo $?
-
-Requirement: error must provably stay under 1.500e-14
-  as written  : 1.671e-14   NOT MET
-  rewritten   : 1.341e-14   MET
-verdict: not met as written; the rewritten form meets it
-1
-```
-
-| exit | meaning |
-|---|---|
-| 0 | the code as written provably meets the requirement |
-| 1 | as written it does not, and a rewritten form does |
-| 2 | no form found meets it |
-| 64 | the arguments or the file could not be understood |
-
-Three verdicts and not two, because the middle one is the common case and it comes with a fix. A usage error is 64 on purpose: a typo in a flag must not read as a statement about the code.
-
-What is checked is the proven bound over the whole declared range. A tuner that samples inputs answers "it was fine on my tests", which is a different sentence, and the difference is the entire point of the exercise.
-
-### Time
-
-`--time-budget` (30 seconds by default, `0` for no limit) puts a clock on the whole analysis. Cutting it short **only loosens the bound, it never makes it wrong**: every stage it skips would have offered a better candidate or a tighter estimate, never a valid one. Skipped stages are named in the output, so a loose answer never looks like a complete one. The clock is checked between stages and never in the middle of one, so the real time can exceed the target by the length of the stage in flight.
-
-## What it measures about itself
-
-Numbers below are produced by `pareto/run_fpbench.py`, which CI re-runs on clean Linux and macOS machines and publishes as an artifact. The run there is given a time budget far larger than any case needs, so the artifact is comparable to this table rather than a cheaper version of it.
-
-**Proven bounds on the FPBench rosa cases.** The bound for the expression as written, and for the form this tool returns:
-
-| case | as written | rewritten |
+| you call | it returns | the right answer |
 |---|---|---|
-| verhulst | 1.587e-16 | 1.587e-16 |
-| predatorPrey | 9.519e-17 | 9.432e-17 |
-| sine | 4.071e-16 | 2.935e-16 |
-| sqroot | 4.857e-16 | 1.882e-16 |
-| rigidBody1 | 2.132e-13 | 1.155e-13 |
-| rigidBody2 | 2.231e-11 | 1.458e-11 |
-| turbine1 | 1.239e-14 | 1.092e-14 |
-| turbine2 | 1.335e-14 | 1.148e-14 |
-| turbine3 | 7.182e-15 | 5.440e-15 |
-| carbonGas | 5.712e-09 | 2.538e-09 |
+| `Vector2Length({1e-30, 1e-30})` | `0` | `1.414e-30` |
+| `Vector2Length({1e20, 1e20})` | `inf` | `1.414e+20` |
 
-Twelve of the thirteen get a tighter bound; `verhulst` is already in its best form. The whole run takes 310 s, of which `carbonGas` alone is 272 — every other case is under nine seconds.
+Not "slightly off". Zero instead of a real length. Infinity instead of a number that fits in the format with room to spare.
 
-**How loose the bound is.** Proven bound divided by the largest error measured over 600 random points plus the domain corners, across the 15 forms on the benchmark fronts: never below the measured error, from x1.44 to x664, **median x2.58**. A factor of two or three is the ordinary price of a worst-case guarantee; the outlier is a form whose real error is near zero.
+The reason: `v.x*v.x` is computed first, and for small numbers that square vanishes to zero, while for large ones it overflows — long before the final answer would. The one-line fix is the standard library function `hypotf`, which gives the right answer in both cases.
 
-**How the bound is checked.** 125 tests. Property-based interval tests, a round trip through the file — rewrite, write out, read back, and require the bound of what was written to be the bound that was promised — and three separate fuzzers that generate random inputs and require the measured error to stay under the printed bound: one for plain binary64 expressions, one for expressions with binary32 and binary16 rounding sprinkled in at random, and one for whole programs with branches. Fuzzing found nine defects in the bound, two of them on the same day the bound was extended. The tenth was found by the work on conditionals rather than by a fuzzer, and it had been there since the first commit: the interval endpoints were computed in ordinary binary64 with no directed rounding, so an interval could come out **narrower** than the true range of values — and a narrow interval scales the error down, which is how a bound stops being a bound. Fixing it cost under 2% on the published bounds; the details are in [docs/how-it-works.md](docs/how-it-works.md).
+This tool found that by itself, in three separate libraries, written by three different authors who did not know each other. **You can check the table above in about two minutes** — the code is public and so is the compiler.
 
-**Supported input.** Scalar `double` and `float` code over `+ - * /`, `sqrt`, `exp`, `log`, `fma`, `expm1`, `log1p`, `hypot`, integer `pow`, plus local variables, `if`/`else` with `&&` and `||`, and loops with a constant trip count. Array reductions are a separate mode. No pointers, no arrays with a computed index, no `while`, no calls to functions we have no bound for — those are refused with the line number, not approximated.
+---
 
-## Where to read further
+## What it does for you
 
-- [docs/how-it-works.md](docs/how-it-works.md) — the pipeline, the compilation path through MLIR, how conditionals and mixed precision are handled, how the bound is verified, how loose it is and why, what the search costs, and the two times the bound lied.
-- [docs/real-projects.md](docs/real-projects.md) — run on three libraries nobody prepared for us (raylib, box2d, Chipmunk2D): what the front end accepts and what it refuses, two defects found in their code, how much tighter the bounds get, and the bit-for-bit check that our parse is the program clang compiles.
-- [docs/witnesses.md](docs/witnesses.md) — concrete inputs on which a function in raylib, box2d or Chipmunk2D returns not a single correct digit, with the code's answer, the true value and the replacement. Eight affected functions, but **one** defect: `sqrt` of a sum of squares, witnessed on an ordinary ±1e3 input range rather than a contrived one. Checkable by substituting numbers, without trusting our upper bound.
-- [docs/comparison.md](docs/comparison.md) — measurements next to Herbie, FPTaylor and Daisy, and an explicit list of what in this project is not new.
-- [examples/](examples/) — four C files to run it on, each one making a different point.
+You give it a function and the range its inputs actually take. You get back:
 
-## Limitations
+1. **The worst error possible** — a number you can put in a safety document.
+2. **A rewritten version** of the same function that is more accurate, and often not slower.
+3. **A plain warning** when the code can return something that is not a number at all.
+4. **A yes/no answer for your build**: "the error stays under 1e-13" — pass or fail, as an exit code.
 
-- Scalar expressions, straight-line code, conditionals and constant-trip-count loops. No matrices, no memory effects, no data-dependent loops — which is where a lot of the real-world win lives.
-- The cost model uses operation weights, not measured latency, and the `fma` weight is calibrated on one laptop. On different hardware the ordering of points on the front can change. Narrow precision is given no speed credit at all (see above).
-- Interval arithmetic ignores correlation between repeated variables; affine arithmetic recovers part of that, and what is left is measured at median x2.58 — see [docs/how-it-works.md](docs/how-it-works.md).
-- Iterated division blows the interval up: three Newton steps over `t ∈ [0.25, 4]` already put zero inside a denominator, and the analysis then answers "infinity", which means "could not prove it", not "the error is huge". Narrower ranges give a bound.
-- Saturation on expressions with roots reaches thousands of nodes; `carbonGas` is the current worst case at minutes rather than seconds. The time budget bounds the wall clock, but a pass inside a compiler needs microseconds, and this is not that yet.
-- On Windows, `mlir-opt` refuses paths containing non-ASCII characters, so the MLIR pipeline stages its files in a temporary directory.
-- Timings were taken on a single laptop CPU (Ryzen 5 5500U, 15 W, thermally limited). CI re-runs the benchmarks on Linux x86-64 and macOS arm64 and publishes the raw numbers, so the ratios can be checked on hardware that is not mine. Accuracy figures are bit-for-bit identical everywhere, as IEEE arithmetic requires; only the speed ratios move.
+Today a compiler offers two choices: keep every operation in the written order and stay slow, or switch on `-ffast-math` and get speed with no guarantee whatsoever. There is nothing in between. This fills that gap.
 
-## Status
+---
 
-Usable tool, reproducible numbers, not a compiler pass. It reads a C file, writes the rewritten function back into it, and answers a requirement with an exit code — which is the whole distance between a demo and something you can put in a build. What it is not: a pass inside a compiler. The search takes seconds where a pass has microseconds, and the input is one scalar function at a time, not a translation unit.
+## What was found in real libraries
 
-Next, in order: the same rewriting as a real MLIR pass on the `arith` dialect instead of emitted modules, calibration of the cost model on the target machine, then an RFC on the LLVM Discourse.
+Three libraries, none of them prepared for us, none of them written by us:
 
-Found a case where it helps, or where it fails? Open an issue with the function and the input ranges. The first few real-world cases will be analysed and published here in full.
+| library | what it does | functions checked | same defect found |
+|---|---|---:|---|
+| [raylib](https://github.com/raysan5/raylib) | graphics and games | 111 | yes |
+| [box2d](https://github.com/erincatto/box2d) | 2-D physics | 37 | yes |
+| [Chipmunk2D](https://github.com/slembcke/Chipmunk2D) | 2-D physics | 19 | yes |
 
-## License
+Eight functions across the three return **not a single correct digit** on ordinary input ranges — coordinates between −1000 and 1000, the kind any game or simulation uses. Each one comes with the exact numbers to reproduce it: [the list is here](docs/witnesses.md).
 
-Apache License 2.0 with LLVM Exceptions — same as LLVM itself, so the pass can go upstream without relicensing.
+It is one defect, not eight. The same mistake, repeated independently by three teams, and found automatically. That is the point.
+
+---
+
+## Why you can believe the numbers
+
+This is the part to hand to your engineers.
+
+**The tool is checked against a real compiler, bit for bit.** Every function is compiled by clang exactly as written, called on random inputs, and its answer is compared with our analysis — not approximately, but every single bit. If our reading of your code differed from your compiler's by one rounding, the comparison fails loudly.
+
+167 functions across the three libraries. **Zero disagreements.**
+
+That check does not run on the author's laptop. It runs on a clean machine in continuous integration: the three libraries are downloaded fresh and compared there, every time the code changes.
+
+**The bound is attacked, not assumed.** Random expressions are generated, evaluated both by the real machine arithmetic and by an independent high-precision reference, and the measured error must stay under the printed bound. This has caught ten real defects in the bound itself over the project's life; each one was fixed at the cause and has a test guarding it. 128 tests run on three operating systems.
+
+**Against other tools, measured, not claimed.** On the standard benchmark set used by this field:
+
+| | tighter bound than ours | tighter bound than theirs |
+|---|---|---|
+| FPTaylor | 1 case out of 10 | we win 10 out of 10 for the user |
+| Daisy | 0 cases out of 10 | we win 10 out of 10 for the user |
+
+The full tables, including the one case we lose, are in [docs/comparison.md](docs/comparison.md).
+
+---
+
+## What it cannot do
+
+An honest list, because you will find this out anyway:
+
+- **It does not read every function.** On these three libraries it accepts half of the ones that do real arithmetic (raylib 50%, Chipmunk2D 35%, box2d 29%). The rest use arrays with computed indices, loops with an unknown number of steps, or system calls — and for those there is no bound to prove, not just no support.
+- **It is not a rewriting champion.** [Herbie](https://herbie.uwplse.org/) is a free tool that searches numerically instead of proving. On deliberately hard cases it finds better forms than we do in six out of nine. It gives no guarantee; we do. These are different products, and we say so.
+- **It needs you to state the ranges.** "Any float at all" is usually unprovable and also untrue of your code. If you cannot say what range an input takes, this tool cannot help you, and neither can any other.
+- **It does not run your preprocessor.** Where a type changes with a build flag, it refuses rather than guesses — because a bound proved for the wrong build is worse than no bound.
+
+---
+
+## Try it
+
+Nothing to install. Download one file — `pareto-fp.pyz` from [Releases](https://github.com/Pumpetee/pareto-fp/releases) — and run it with any Python 3.10 or newer:
+
+```
+python pareto-fp.pyz "x*x - y*y" --domain x=1000..1000.001 --domain y=999.999..1000
+```
+
+The same page has standalone binaries for Linux, macOS and Windows: one file, no Python needed.
+
+On your own file:
+
+```
+python pareto-fp.pyz --file kernel.c --function energy --domain v=1..2 --require 1e-13
+```
+
+Exit code 0: your requirement holds as the code is written. 1: it does not hold as written, but the rewritten form the tool prints does hold. 2: no form found holds it. That is what makes it usable inside a build and not only in a terminal.
+
+The ranges are not optional. Without knowing what the inputs are, there is no error to bound — for us or for anyone.
+
+More: [how it works](docs/how-it-works.md) · [run on real libraries](docs/real-projects.md) · [side by side with other tools](docs/comparison.md) · [reproducible defects](docs/witnesses.md)
+
+License: Apache 2.0 with the LLVM exception.
+
+---
+
+**Check it yourself in one line** (needs `git`, `clang` and Python; run it inside a clone of this repository): `git clone --depth 1 https://github.com/raysan5/raylib.git && python tools/difftest_c.py raylib` — it compiles every function of that library with clang, calls both it and our analysis on the same random inputs, and reports bit for bit whether the two agree.
