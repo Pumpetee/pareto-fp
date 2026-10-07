@@ -21,7 +21,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from arith_coverage import INT_TYPES, is_float_candidate   # noqa: E402
+from arith_coverage import SKIP_DIRS, candidate_set   # noqa: E402
 
 from pareto import budget as _budget
 from pareto.api import analyse_c_function, domain_hazards
@@ -32,9 +32,7 @@ from pareto.cfront import (CParseError, collect_context, constants, functions,
 ARITH = {'+', '-', '*', '/', 'fma', 'sqrt', 'exp', 'log', 'expm1', 'log1p',
          'sin', 'cos', 'atan', 'atan2', 'hypot', 'neg'}
 
-SKIP_DIRS = {'.git', 'build', 'cmake', 'tests', 'test', 'examples', 'example',
-             'demo', 'demos', 'third_party', 'external', 'extern', 'vendor',
-             'docs', 'doc', 'benchmark', 'benchmarks', 'samples'}
+# Список исключаемых каталогов один на все инструменты — см. arith_coverage.
 
 
 def counts_arithmetic(prog):
@@ -115,8 +113,7 @@ def main():
                             globs=globs)
     ctx = {'types': types, 'table': table, 'resolve': resolve, 'macros': macros,
            'consts': consts, 'globs': globs}
-    float_types = set(types) | {'float', 'double'}
-    type_names = set(types) | set(table) | INT_TYPES | {'float', 'double'}
+    arith_names = candidate_set(files, types, table, macros)
 
     seen = accepted = trivial = candidates = taken = 0
     proved = unproved = 0
@@ -136,7 +133,7 @@ def main():
             # Та же мера кандидата, что в arith_coverage: два документа про один
             # проект обязаны называть одно число. Разные знаменатели в разговоре
             # о покупке читаются как путаница в своих же данных.
-            is_cand, _ = is_float_candidate(src, name, float_types, type_names)
+            is_cand = name in arith_names
             if is_cand:
                 candidates += 1
             flds = struct_result_fields(src, name, types, table) or [None]

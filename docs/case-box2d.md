@@ -14,16 +14,22 @@ python tools/difftest_c.py C:\Users\user\_scan\box2d   # сверка с clang �
 
 | | функций | доля |
 |---|---:|---:|
-| всего найдено | 478 | |
-| принято фронтендом | 131 | 27.4% |
-| **из них с вычислениями** | **56** | **11.7%** |
-| чтение поля без вычислений | 75 | 15.7% |
+| всего найдено | 452 | |
+| принято фронтендом | 130 | 28.8% |
+| **из них с вычислениями** | **55** | **12.2%** |
+| чтение поля без вычислений | 75 | 16.6% |
 
 Вторая строка — та, которую обычно показывают. Третья — честная: функция вида `return body->m` проходит фронтенд, но доказывать в ней нечего.
 
+Главное число — доля от КАНДИДАТОВ, то есть от функций, где по тексту исходника есть вещественная арифметика. Остальные в знаменатель ставить нельзя: в `void`-процедуре или целочисленном счётчике доказывать нечего, и держать их там значило бы назначить себе цель, которой достичь невозможно.
+
+**Принято из кандидатов: 36 из 140 — 25.7%**
+
 ## Границы
 
-Граница доказана: **48**, не доказана: **8**.
+Предел времени на функцию: 5 с. Из-за него на части функций поиск оборван, и граница ниже могла быть туже: Pareto extraction, domain branching, per-box refinement of the branches, saturation rounds, series and compensated candidates. Снимается ключом `--budget 0`.
+
+Граница доказана: **48**, не доказана: **7**.
 
 Где перепись даёт больше всего:
 
@@ -53,14 +59,14 @@ python tools/difftest_c.py C:\Users\user\_scan\box2d   # сверка с clang �
 
 | причина | функций |
 |---|---:|
-| it is neither an argument nor a local variable of  | 116 |
-| type b2Pos is declared more than once with differe | 25 |
+| it is neither an argument nor a local variable of  | 111 |
+| type b2Pos is declared more than once with differe | 23 |
 | type b2WorldTransform is declared more than once w | 17 |
 | cannot read an expression starting at '&' | 16 |
-| statement starting at 'def' is not supported | 16 |
+| statement starting at 'def' is not supported | 15 |
 | this method proves bounds on straight-line code, o | 12 |
-| that is an array or an output parameter, and neith | 9 |
 | statement starting at 'b2RecR_JointBase' is not su | 9 |
-| declaration of 'const' inside the body is not supp | 8 |
-| cannot read an expression starting at '.' | 5 |
+| that is an array or an output parameter, and neith | 8 |
+| declaration of 'const' inside the body is not supp | 7 |
+| cannot read an expression starting at '.' | 4 |
 

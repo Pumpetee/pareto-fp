@@ -90,7 +90,7 @@ The full tables, including the one case we lose, are in [docs/comparison.md](doc
 
 An honest list, because you will find this out anyway:
 
-- **It does not read every function.** On these three libraries it accepts half of the ones that do real arithmetic (raylib 50%, Chipmunk2D 35%, box2d 29%). The rest use arrays with computed indices, loops with an unknown number of steps, or system calls — and for those there is no bound to prove, not just no support.
+- **It does not read every function.** On these three libraries it accepts about half of the ones that do real arithmetic (raylib 49%, Chipmunk2D 30%, box2d 26%). The rest use arrays with computed indices, loops with an unknown number of steps, or system calls — and for those there is no bound to prove, not just no support.
 - **It is not a rewriting champion.** [Herbie](https://herbie.uwplse.org/) is a free tool that searches numerically instead of proving. On deliberately hard cases it finds better forms than we do in six out of nine. It gives no guarantee; we do. These are different products, and we say so.
 - **It needs you to state the ranges.** "Any float at all" is usually unprovable and also untrue of your code. If you cannot say what range an input takes, this tool cannot help you, and neither can any other.
 - **It does not run your preprocessor.** Where a type changes with a build flag, it refuses rather than guesses — because a bound proved for the wrong build is worse than no bound.

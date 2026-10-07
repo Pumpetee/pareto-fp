@@ -28,6 +28,9 @@ import tempfile
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from arith_coverage import SKIP_DIRS   # noqa: E402
 
 from pareto.cfront import (collect_context, constants, functions, globals_of,
                            macro_aliases, make_resolver, parse_function,
@@ -409,9 +412,7 @@ def main():
     # трёх библиотеках 155 функций, а с компилятором было сверено 37. Остальные
     # 118 никто снаружи не проверял — и ровно в этом разрыве и живёт самая опасная
     # ошибка: разбор не той программы, что написана.
-    SKIP_DIRS = {'demo', 'demos', 'test', 'tests', 'example', 'examples',
-                 'extern', 'external', 'third_party', 'vendor', 'build',
-                 'benchmark', 'benchmarks', 'samples'}
+    # Список исключаемых каталогов один на все инструменты — см. arith_coverage.
     if whole_repo:
         root = given
         targets = sorted(

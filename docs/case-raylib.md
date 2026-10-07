@@ -21,6 +21,10 @@ python tools/difftest_c.py C:\Users\user\_scan\raylib   # сверка с clang 
 
 Вторая строка — та, которую обычно показывают. Третья — честная: функция вида `return body->m` проходит фронтенд, но доказывать в ней нечего.
 
+Главное число — доля от КАНДИДАТОВ, то есть от функций, где по тексту исходника есть вещественная арифметика. Остальные в знаменатель ставить нельзя: в `void`-процедуре или целочисленном счётчике доказывать нечего, и держать их там значило бы назначить себе цель, которой достичь невозможно.
+
+**Принято из кандидатов: 88 из 179 — 49.2%**
+
 ## Границы
 
 Предел времени на функцию: 5 с. Из-за него на части функций поиск оборван, и граница ниже могла быть туже: Pareto extraction, compensated schemes, domain branching, per-box refinement of the branches, recheck of the extracted forms, saturation rounds, series and compensated candidates, series expansion of subexpressions, sqrt-square candidates. Снимается ключом `--budget 0`.

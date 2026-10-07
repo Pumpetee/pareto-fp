@@ -25,6 +25,9 @@ from decimal import Decimal
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from arith_coverage import SKIP_DIRS   # noqa: E402
 
 from pareto.api import analyse_c_function
 from pareto.cfront import (collect_context, constants, functions, globals_of,
@@ -35,9 +38,7 @@ from pareto.evalfp import eval_float
 from pareto.exactref import exact_stable
 from pareto.parser import parse as parse_expr
 
-SKIP_DIRS = {'.git', 'build', 'cmake', 'tests', 'test', 'examples', 'example',
-             'demo', 'demos', 'third_party', 'external', 'extern', 'vendor',
-             'docs', 'doc', 'benchmark', 'benchmarks', 'samples'}
+# Список исключаемых каталогов один на все инструменты — см. arith_coverage.
 
 
 # Сколько верных десятичных цифр формат вообще способен держать. Выше этого

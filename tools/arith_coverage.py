@@ -33,15 +33,15 @@ from pareto.cfront import (CParseError, collect_context, constants, functions,
                            globals_of, macro_aliases, make_resolver,
                            parse_function, struct_result_fields)
 
+# Один список на все инструменты. Пока он был свой у каждого, дело-папка по
+# box2d считала 23.4%, а мера охвата 25.7% — разница только в том, что один
+# инструмент исключал каталог shared, а другой нет. Два наших же документа про
+# один проект называли разные числа, и это читается как путаница в своих данных.
 SKIP_DIRS = {'.git', 'build', 'cmake', 'tests', 'test', 'examples', 'example',
              'demo', 'demos', 'third_party', 'external', 'extern', 'vendor',
              'docs', 'doc', 'benchmark', 'benchmarks', 'samples',
-             # box2d/shared — не библиотека, а её вспомогательный код: по
-             # собственному CMakeLists это отдельная статическая цель, которая
-             # собирается только при включённых примерах, тестах или
-             # бенчмарках, и её заголовок так и подписан. Исключаю по
-             # документу проекта, а не потому, что там неудобные отказы;
-             # ключ --with-samples печатает число и вместе с ними.
+             # box2d/shared — по собственному CMakeLists отдельная цель, которая
+             # собирается только при включённых примерах, тестах и бенчмарках.
              'shared'}
 
 LIBM = {'sqrt', 'sqrtf', 'exp', 'expf', 'log', 'logf', 'sin', 'sinf', 'cos',
@@ -106,12 +106,22 @@ def strip_declarations(text, type_names):
     return out
 
 
-def is_float_candidate(src, name, float_types, type_names):
+def is_float_candidate(src, name, float_types, type_names, macros=None,
+                       arith_names=None):
     """Есть ли в функции вещественная арифметика. Судим по тексту.
 
-    Нужны оба условия: вещественный тип в подписи или среди локальных, И хоть
-    одна арифметическая операция либо вызов libm. Одного типа мало — геттер
-    `return body->m` возвращает double и не вычисляет ничего.
+    Два источника кроме прямых операций, и оба обязательны.
+
+    Первый — псевдонимы макросов. Chipmunk пишет `cpfsqrt` вместо `sqrt`, и без
+    разворота `cpvlength` не считалась кандидатом вовсе: в её теле нет ни одной
+    арифметической операции, только два вызова. То есть функция, на которой стоит
+    главная находка проекта, не попадала в счёт — изъян в мою же пользу, потому
+    что уменьшал знаменатель.
+
+    Второй — вызов функции ЭТОГО ЖЕ проекта, которая сама считает. `cpvlength`
+    зовёт `cpvdot`, а та перемножает координаты; значение оттуда течёт в наш
+    расчёт, и ошибка вместе с ним. Это решается в два прохода снаружи: сначала
+    отмечаются функции с прямой арифметикой, потом те, кто их зовёт.
     """
     params, body = body_of(src, name)
     if body is None:
@@ -124,7 +134,11 @@ def is_float_candidate(src, name, float_types, type_names):
         return False, 'вещественных типов в подписи и теле нет'
 
     calls = set(re.findall(r'([A-Za-z_]\w*)\s*\(', clean))
+    if macros:
+        calls |= {macros[c] for c in calls if c in macros}
     if calls & LIBM:
+        return True, ''
+    if arith_names and (calls & arith_names):
         return True, ''
 
     bare = strip_declarations(clean, type_names)
@@ -157,6 +171,45 @@ def tree_has_arithmetic(prog):
         elif st[0] not in ('let', 'return'):
             return True
     return False
+
+
+def candidate_set(files, types, table, macros):
+    """Имена функций проекта, в которых есть вещественная арифметика.
+
+    Вынесено отдельно нарочно: этим числом пользуются сразу три инструмента, и
+    если каждый посчитает его по-своему, наши же документы про один проект
+    назовут разные цифры. В разговоре о покупке это читается не как разные
+    методики, а как путаница в своих данных.
+
+    Два прохода: сначала функции с ПРЯМОЙ арифметикой, потом те, кто их зовёт.
+    Повтор до неподвижной точки, но не больше трёх кругов — цепочки обёрток в
+    живом коде короткие, а бесконечный обход на взаимной рекурсии не нужен.
+    """
+    float_types = set(types) | {'float', 'double'}
+    type_names = set(types) | set(table) | INT_TYPES | {'float', 'double'}
+    bodies = {}
+    for f in files:
+        try:
+            src = f.read_text(encoding='utf-8', errors='replace')
+            names = functions(src, types, table)
+        except Exception:
+            continue
+        for name in names:
+            bodies.setdefault(name, src)
+    out = set()
+    for _ in range(3):
+        grew = False
+        for name, src in bodies.items():
+            if name in out:
+                continue
+            ok, _ = is_float_candidate(src, name, float_types, type_names,
+                                       macros=macros, arith_names=out)
+            if ok:
+                out.add(name)
+                grew = True
+        if not grew:
+            break
+    return out
 
 
 def reason_key(msg):
@@ -217,6 +270,8 @@ def main():
     type_names = (set(types) | set(table) | INT_TYPES
                   | {'float', 'double'})
 
+    arith_names = candidate_set(files, types, table, macros)
+
     total = candidates = taken = 0
     disagree = []
     reasons = collections.Counter()
@@ -233,7 +288,7 @@ def main():
             continue
         for name in names:
             total += 1
-            ok, _ = is_float_candidate(src, name, float_types, type_names)
+            ok = name in arith_names
             if not ok:
                 continue
             candidates += 1

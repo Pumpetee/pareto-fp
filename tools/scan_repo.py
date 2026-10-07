@@ -18,13 +18,15 @@ import sys
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
+
+from arith_coverage import SKIP_DIRS   # noqa: E402
 
 from pareto.cfront import (CParseError, collect_context, functions,
                            constants, globals_of, macro_aliases,
                            make_resolver, parse_function)
 
-SKIP_DIRS = {'.git', 'build', 'cmake', 'tests', 'test', 'examples', 'third_party',
-             'external', 'vendor', 'docs', 'doc'}
+# Список исключаемых каталогов один на все инструменты — см. arith_coverage.
 
 
 def reason_key(msg):
