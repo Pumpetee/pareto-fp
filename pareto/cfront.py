@@ -471,23 +471,27 @@ class _Parser:
 
         stmts = cal['stmts']
         if len(stmts) != 1 or stmts[0][0] != 'return':
-            picked = as_select(stmts)
-            if picked is None:
-                raise CParseError(
-                    'the called function {} is not a single return expression, so it cannot '
-                    'be substituted here'.format(cal['name']), tok.line)
-            tree, _fmt = picked
-            # Кладём ОБЫЧНОЕ дерево, а не Typed: ниже по этой же функции идёт
+            flat = flatten_program(stmts)
+            if flat is not None:
+                stmts = [('return', flat)]
+            else:
+                picked = as_select(stmts)
+                if picked is None:
+                    raise CParseError(
+                        'the called function {} is not a single return expression, so it '
+                        'cannot be substituted here'.format(cal['name']), tok.line)
+                tree, _fmt = picked
+                # Кладём ОБЫЧНОЕ дерево, а не Typed: ниже по этой же функции идёт
             # подстановка аргументов обходом узлов, и обёртка ломала её с
             # TypeError. Я написал здесь Typed в цикле 50 из заботы о формате —
             # и тем самым сломал ровно то, что включал: подстановка cpfmin и
             # cpfmax падала вместо работы, причём молча для тестов, потому что ни
             # один из них не подставлял функцию с выбором внутрь выражения.
             #
-            # Формат и не требовался: возврат этой функции оборачивается в Typed
-            # с cal['result'] на выходе, то есть тип берётся из объявления
-            # вызванной функции, как и надо.
-            stmts = [('return', tree)]
+                # Формат и не требовался: возврат этой функции оборачивается в
+                # Typed с cal['result'] на выходе, то есть тип берётся из
+                # объявления вызванной функции, как и надо.
+                stmts = [('return', tree)]
 
         sub = {}
         for (base, fields), (kind, val) in zip(groups, raw):
@@ -719,6 +723,9 @@ class _Parser:
             got = self.struct_local_init()
             if got is not None:
                 return got
+            got = self.struct_call_init()
+            if got is not None:
+                return got
         if tok.text == '{':
             return self.block()
         if tok.kind == 'name' and (tok.text in self.structs
@@ -871,6 +878,134 @@ class _Parser:
             self.vars[vname + '.' + fname] = (inner, fmt)
         return out
 
+    def compound_literal(self):
+        """`(b2Vec2){ e1, e2 }` или `B2_LITERAL(b2Vec2){ e1, e2 }` — список значений.
+
+        Составной литерал по стандарту C99, и в box2d им написан возврат почти
+        всей векторной математики. Имя макроса перед скобками допускается: B2_LITERAL
+        разворачивается ровно в приведение типа, и для нас это шум, который надо
+        пропустить, а не повод отвергнуть функцию.
+
+        Возвращает (имя типа, список значений) либо None без потребления лексем.
+        """
+        start = self.i
+        if self.peek().kind == 'name' and self.peek(1).text == '(':
+            self.take()                    # имя макроса
+        if not self.at('('):
+            self.i = start
+            return None
+        self.take('(')
+        if self.peek().kind != 'name':
+            self.i = start
+            return None
+        tname = self.take().text
+        if tname in ('struct', 'union') and self.peek().kind == 'name':
+            tname = self.take().text
+        if tname not in self.structs or not self.at(')'):
+            self.i = start
+            return None
+        self.take(')')
+        if not self.at('{'):
+            self.i = start
+            return None
+        self.take('{')
+        values = []
+        if not self.at('}'):
+            while True:
+                values.append(self.expr())
+                if self.at(','):
+                    self.take(',')
+                    if self.at('}'):
+                        break
+                    continue
+                break
+        self.take('}')
+        return tname, values
+
+    def literal_field(self, tname, values, field):
+        """Значение нужного поля из позиционного списка составного литерала."""
+        fields = [(f, fm) for f, fm in self.structs[tname].items()
+                  if isinstance(fm, Format)]
+        for idx, (fname, fmt) in enumerate(fields):
+            if fname != field:
+                continue
+            if idx < len(values):
+                val = values[idx]
+            elif len(values) == 1 and _is_zero(values[0]):
+                val = values[0]
+            else:
+                val = Typed(('num', 0.0), fmt)
+            tree = val.tree if val.fmt is fmt else _wrap(val.tree, fmt)
+            return Typed(tree, fmt)
+        return None
+
+    def struct_call_init(self):
+        """`b2Vec2 p = b2Add(a, b);` — структурная локальная от вызова функции.
+
+        Самая частая форма в живом коде и до сих пор самая частая причина отказа:
+        в box2d двенадцать функций падали на сообщении «неизвестное имя b2Vec2»,
+        потому что разбор доходил до объявления и пытался читать его как
+        выражение.
+
+        Вызванная функция подставляется ПО ПОЛЯМ: `b2Add` даёт два скалярных
+        выражения, по одному на координату, и каждое становится своей локальной
+        величиной. Если хотя бы одно поле подставить не удалось, отказываемся
+        целиком и откатываем разбор: половина подстановки хуже отказа, потому что
+        даёт границу для программы, которой нет.
+        """
+        start = self.i
+        tname = self.take().text
+        if tname not in self.structs or self.peek().kind != 'name':
+            self.i = start
+            return None
+        vname = self.take().text
+        if not self.at('='):
+            self.i = start
+            return None
+        self.take('=')
+        if self.peek().kind != 'name' or self.peek(1).text != '(':
+            self.i = start
+            return None
+
+        fields = [(f, fm) for f, fm in self.structs[tname].items()
+                  if isinstance(fm, Format)]
+        if not fields:
+            self.i = start
+            return None
+
+        call_at = self.i
+        out, slots = [], {}
+        for fname, fmt in fields:
+            self.i = call_at
+            tok = self.take()
+            cname = self.macros.get(tok.text, tok.text) if self.macros else tok.text
+            self.take('(')
+            cal = self.resolve(cname, fname) if self.resolve is not None else None
+            if cal is None:
+                self.i = start
+                return None
+            raw = []
+            if not self.at(')'):
+                raw.append(self.user_arg())
+                while self.at(','):
+                    self.take(',')
+                    raw.append(self.user_arg())
+            self.take(')')
+            try:
+                value = self.inline(cal, raw, tok)
+            except CParseError:
+                self.i = start
+                return None
+            tree = value.tree if value.fmt is fmt else _wrap(value.tree, fmt)
+            inner = self.fresh(vname + '.' + fname)
+            out.append(('let', inner, tree))
+            slots[fname] = (inner, fmt)
+        self.take(';')
+        self.struct_locals[vname] = (tname, slots)
+        for fname, (inner, fmt) in slots.items():
+            self.vars[vname + '.' + fname] = (inner, fmt)
+        return out
+
     def struct_field_assignment(self):
         """`result.x = expr;` — присваивание полю структурной локальной."""
         start = self.i
@@ -992,6 +1127,17 @@ class _Parser:
                 out = self.return_expr()
                 self.take(')')
                 return out
+        # `return (b2Vec2){ e1, e2 };` — составной литерал прямо в возврате.
+        if self.want_field:
+            got = self.compound_literal()
+            if got is not None:
+                tname, values = got
+                picked = self.literal_field(tname, values, self.want_field)
+                if picked is None:
+                    raise CParseError('{} has no field {!r}'.format(
+                        tname, self.want_field), self.peek().line)
+                return [('return', picked)]
+
         # `return result;` где result — структурная локальная: отдаём выражение
         # нужного поля. Какое именно поле нужно, разборщику сказали заранее.
         if (self.want_field and self.peek().kind == 'name'
@@ -1188,6 +1334,40 @@ def _subst_cond(cond, env):
     return (cond[0], substitute(cond[1], env), substitute(cond[2], env))
 
 
+def flatten_program(stmts):
+    """Прямолинейная программа как ОДНО выражение. None, если есть ветвление.
+
+    Нужно для подстановки вызова. Раньше подстановка требовала ровно один
+    оператор `return`, и потому отказывала ЛЮБОЙ функции с локальной
+    переменной — а так написано большинство: `cpFloat d = ...; return d*d;`.
+    Локальные переменные подставляются внутрь, и смысл от этого не меняется:
+    каждая из них по построению вычисляется один раз и больше не меняется
+    (переприсваивание даёт новое внутреннее имя).
+    """
+    env, result = {}, None
+    for st in stmts:
+        if st[0] == 'let':
+            env[st[1]] = st[2].tree if hasattr(st[2], 'tree') else st[2]
+        elif st[0] == 'return':
+            result = st[1].tree if hasattr(st[1], 'tree') else st[1]
+        else:
+            return None
+    if result is None:
+        return None
+
+    def walk(node):
+        if not isinstance(node, tuple):
+            return node
+        if node[0] == 'var':
+            inner = env.get(node[1])
+            return walk(inner) if inner is not None else node
+        if node[0] == 'num':
+            return node
+        return (node[0],) + tuple(walk(k) for k in node[1:])
+
+    return walk(result)
+
+
 def as_select(stmts):
     """Свести тело из одного ветвления к выражению, если это выбор, а не разветвление.
 
@@ -1329,8 +1509,19 @@ def struct_result_fields(src, name, types=None, table=None):
     отдельными границами.
     """
     types = types or scalar_types(src)
-    table = dict(table or {})
-    table.update(structs(src, types))
+    merged = StructTable()
+    # Имена цикла нарочно не name: параметр с этим именем означает ФУНКЦИЮ, и
+    # затенение его уже стоило молчаливого «структурных полей нет» — сравнение
+    # шло с последним именем структуры вместо имени функции, и 110 функций
+    # raymath.h отвергались без видимой причины.
+    for _tn, _flds in (table or {}).items():
+        merged[_tn] = _flds
+    merged.conflicts.update(getattr(table, 'conflicts', {}) or {})
+    local = structs(src, types)
+    for _tn, _flds in local.items():
+        _record_struct(merged, _tn, _flds, keep_first=True)
+    merged.conflicts.update(getattr(local, 'conflicts', {}) or {})
+    table = merged
     rx = _any_signature_re(types, table)
     if rx is None:
         return []
@@ -1351,8 +1542,13 @@ _STRUCT = re.compile(
 # Вторая форма объявления: `struct cpBody { ... };` без typedef. Chipmunk пишет
 # именно так, и без неё указатель на cpBody остаётся для нас пустым типом —
 # 05.10.2026 на этом не сдвинулся охват, хотя указатели уже читались.
+# Тело БЕЗ вложенных фигурных скобок. С нежадным `.*?` выражение захватывало
+# несколько структур подряд: поиск шёл от `struct b2Vec2 {` до первой `};` в
+# файле, и в поля b2Vec2 попадали lowerBound и upperBound из b2AABB. Пока
+# действовало правило «первое объявление главнее», мусор не был виден; стоило
+# начать замечать расхождения объявлений — и он вылез сразу.
 _STRUCT_NAMED = re.compile(
-    r"struct\s+([A-Za-z_]\w*)\s*\{(.*?)\}\s*;", re.S)
+    r"struct\s+([A-Za-z_]\w*)\s*\{([^{}]*)\}\s*;", re.S)
 _ALIAS = re.compile(r"typedef\s+([A-Za-z_]\w*)\s+([A-Za-z_]\w*)\s*;")
 _FIELD = re.compile(r"\b(double|float)\s+([^;\{\}]+);")
 
@@ -1524,9 +1720,12 @@ def make_resolver(texts, types, table, depth=4, macros=None, consts=None,
     cache = {}
     stack = []
 
-    def resolve(name):
-        if name in cache:
-            return cache[name]
+    def resolve(name, field=None):
+        # Поле нужно для вызываемых функций, отдающих структуру: `b2Vec2 p =
+        # b2Add(a, b);` это две скалярные программы, по одной на координату.
+        key = (name, field)
+        if key in cache:
+            return cache[key]
         if len(stack) >= depth or name in stack:
             return None
         stack.append(name)
@@ -1536,12 +1735,12 @@ def make_resolver(texts, types, table, depth=4, macros=None, consts=None,
                     continue
                 try:
                     prog = parse_function(src, name, types, table, resolve, macros,
-                                          consts, globs)
+                                          consts, globs, field=field)
                 except Exception:
                     continue
-                cache[name] = prog
+                cache[key] = prog
                 return prog
-            cache[name] = None
+            cache[key] = None
             return None
         finally:
             stack.pop()
@@ -1568,9 +1767,16 @@ def collect_context(paths):
     for _ in range(2):
         for src in texts:
             types = scalar_types(src, types)
-    table = {}
+    # Таблица проекта хранит и СПОРЫ объявлений. Их надо переносить между
+    # файлами: одно и то же имя под условной сборкой встречается в одном
+    # заголовке, а зависящая от него функция — в другом. Терялся список здесь, и
+    # отказ по спорному типу не срабатывал, хотя сам спор уже находился.
+    table = StructTable()
     for src in texts:
-        table.update(structs(src, types))
+        part = structs(src, types)
+        for name, fields in part.items():
+            _record_struct(table, name, fields, keep_first=True)
+        table.conflicts.update(getattr(part, 'conflicts', {}) or {})
     return types, table
 
 
@@ -1610,6 +1816,57 @@ def _field_re(types):
     return re.compile(r"\b(" + alt + r")\s+([^;\{\}]+);")
 
 
+def _record_struct(out, name, fields, keep_first=False):
+    """Положить структуру, а при РАЗНЫХ объявлениях одного имени — запомнить спор.
+
+    keep_first нужен для второго прохода по именованным структурам: у typedef-а
+    объявление полнее, и перезаписывать им уже найденное нельзя. Спор при этом
+    всё равно отмечается — именно он и важен.
+    """
+    old = out.get(name)
+    if old is not None and old != fields:
+        differing = sorted(set(old) ^ set(fields))
+        if not differing:
+            differing = sorted(f for f in old
+                               if f in fields and old[f] is not fields[f])
+        if differing:
+            out.conflicts[name] = differing
+        if keep_first:
+            return
+    elif old is not None and keep_first:
+        return
+    out[name] = fields
+
+
+class StructTable(dict):
+    """Структуры проекта плюс имена, объявленные ПО-РАЗНОМУ дважды.
+
+    Мы не выполняем препроцессор, и это имеет цену. В box2d написано так:
+
+        #if defined( BOX2D_DOUBLE_PRECISION )
+        typedef struct b2Pos { double x, y; } b2Pos;
+        #else
+        typedef struct b2Pos { float x, y; } b2Pos;
+        #endif
+
+    Оба объявления лежат в одном файле. Мы читали их подряд и оставляли то, что
+    попалось последним, — то есть выбирали точность за компилятора. 07.10.2026
+    побитовая сверка показала итог: наш разбор считал разность в двойной
+    точности, компилятор в одинарной, и пять функций box2d расходились с ним.
+
+    Молча угадывать здесь нельзя: граница вышла бы верной для программы, которой
+    в сборке нет. Поэтому противоречие запоминается, и функция, зависящая от
+    такого типа, честно отвергается с указанием имени — человек знает свой флаг
+    сборки и может сказать его нам.
+    """
+
+    __slots__ = ('conflicts',)
+
+    def __init__(self, *a, **kw):
+        super().__init__(*a, **kw)
+        self.conflicts = {}
+
+
 def structs(src, types=None):
     """Структуры файла как наборы вещественных полей.
 
@@ -1624,7 +1881,7 @@ def structs(src, types=None):
     """
     types = types or FLOAT_TYPES
     field_re = _field_re(types)
-    out = {}
+    out = StructTable()
     for m in _STRUCT.finditer(src):
         body, name = m.group(1), m.group(2)
         fields = {}
@@ -1661,7 +1918,7 @@ def structs(src, types=None):
                 if re.fullmatch(r"[A-Za-z_]\w*", fn or "") and fn not in fields:
                     fields[fn] = ('struct', tname2)
         if fields:
-            out[name] = fields
+            _record_struct(out, name, fields)
     for m in _STRUCT_NAMED.finditer(src):
         name, body = m.group(1), m.group(2)
         fields = {}
@@ -1699,14 +1956,23 @@ def structs(src, types=None):
                 fn = raw.strip().lstrip('*').strip()
                 if re.fullmatch(r"[A-Za-z_]\w*", fn or "") and fn not in fields:
                     fields[fn] = ('struct', tname2)
-        if fields and name not in out:
-            out[name] = fields
+        if fields:
+            _record_struct(out, name, fields, keep_first=True)
     # Псевдонимы вида `typedef Vector4 Quaternion;` — тот же набор полей.
     for _ in range(3):
         for m in _ALIAS.finditer(src):
             src_t, dst_t = m.group(1), m.group(2)
-            if src_t in out and dst_t not in out:
+            if src_t not in out:
+                continue
+            if dst_t not in out:
                 out[dst_t] = dict(out[src_t])
+            elif out[dst_t] != out[src_t]:
+                # Имя объявлено и структурой, и псевдонимом на ДРУГУЮ структуру.
+                # В box2d это b2Pos: под BOX2D_DOUBLE_PRECISION он struct с
+                # double, без него — псевдоним b2Vec2 с float. Выбрать за
+                # компилятора мы не можем и не будем.
+                out.conflicts[dst_t] = sorted(
+                    set(out[dst_t]) | set(out[src_t]))
     return out
 
 
@@ -1736,8 +2002,17 @@ def parse_function(src, name=None, types=None, table=None, resolve=None,
     # Типы и структуры могут прийти снаружи — собранные по всему проекту, а не по
     # одному файлу: объявления живут в заголовках, а разбираем мы .c.
     types = types or scalar_types(src)
-    table = dict(table or {})
-    table.update(structs(src, types))
+    # Таблица структур с сохранением СПОРОВ объявлений: обычный dict терял
+    # список, и проверка ниже оказывалась мёртвой.
+    merged = StructTable()
+    for _tn, _flds in (table or {}).items():
+        merged[_tn] = _flds
+    merged.conflicts.update(getattr(table, 'conflicts', {}) or {})
+    local = structs(src, types)
+    for _tn, _flds in local.items():
+        _record_struct(merged, _tn, _flds, keep_first=True)
+    merged.conflicts.update(getattr(local, 'conflicts', {}) or {})
+    table = merged
     rx = _any_signature_re(types, table) or _signature_re(types)
     matches = list(rx.finditer(src))
     if not matches:
@@ -1752,6 +2027,28 @@ def parse_function(src, name=None, types=None, table=None, resolve=None,
             name, ', '.join(m.group(2) for m in matches)))
 
     ret_tname = " ".join(chosen.group(1).split())
+    fname = chosen.group(2)
+    params = chosen.group(3).strip()
+    line0 = src.count('\n', 0, chosen.start()) + 1
+
+    # Тип, объявленный в проекте по-разному под условной сборкой, — повод
+    # отказаться, а не угадать. Иначе граница окажется верной для программы,
+    # которой в сборке нет; ровно это и случилось с b2Pos до 07.10.2026: под
+    # BOX2D_DOUBLE_PRECISION это структура с double, без него — псевдоним
+    # b2Vec2 с float. Мы читали оба объявления и брали одно из них молча.
+    conflicts = getattr(table, 'conflicts', {}) or {}
+    if conflicts:
+        used = {ret_tname}
+        for part in params.split(','):
+            for w in part.replace('*', ' ').split():
+                used.add(w)
+        bad = sorted(used & set(conflicts))
+        if bad:
+            raise CParseError(
+                'type {} is declared more than once with different fields in this '
+                'project (conditional compilation). Which one applies depends on '
+                'your build flags, and guessing would mean bounding a different '
+                'program'.format(', '.join(bad)), line0)
     want_field = None
     if ret_tname in types:
         ret_fmt = types[ret_tname]
@@ -1774,9 +2071,6 @@ def parse_function(src, name=None, types=None, table=None, resolve=None,
                 ret_tname, field, ', '.join(fields)))
         ret_fmt = fields[field]
         want_field = field
-    fname = chosen.group(2)
-    params = chosen.group(3).strip()
-    line0 = src.count('\n', 0, chosen.start()) + 1
 
     args = {}
     order = []
